@@ -1,0 +1,316 @@
+# zsc.py - Rose Online ZSC Scene File Parser
+from .utils import *
+
+from enum import IntEnum
+from typing import List, Optional, NamedTuple, Dict, Any
+
+import bpy
+from bpy.props import StringProperty, BoolProperty
+from bpy_extras.io_utils import ImportHelper
+
+# === ENUMS ===
+
+class BlendMode(IntEnum):
+    NONE = 0
+    CUSTOM = 1
+    NORMAL = 2
+    LIGHTEN = 3
+
+
+class GlowType(IntEnum):
+    NONE = 0
+    NOTSET = 1
+    SIMPLE = 2
+    LIGHT = 3
+    TEXTURE = 4
+    TEXTURELIGHT = 5
+    ALPHA = 6
+
+
+class FlagType(IntEnum):
+    POSITION = 0x1
+    ROTATION = 0x2
+    SCALE = 0x3
+    AXISROTATION = 0x4
+    BONEINDEX = 0x5
+    DUMMYINDEX = 0x6
+    PARENT = 0x7
+    COLLISION = 0x1D
+    ZMOPATH = 0x1E
+    RANGEMODE = 0x1F
+    LIGHTMAPMODE = 0x20
+
+
+class CollisionType(IntEnum):
+    NONE = 0
+    SPHERE = 1
+    AXISALIGNEDBOUNDINGBOX = 2
+    ORIENTEDBOUNDINGBOX = 3
+    POLYGON = 4
+
+
+class CollisionPickType(IntEnum):
+    NONE = 0
+    NOTMOVABLE = 8
+    NOTPICKABLE = 16
+    HEIGHTONLY = 32
+    NOCAMERACOLLISION = 64
+
+
+class EffectType(IntEnum):
+    NORMAL = 0
+    DAYNIGHT = 1
+    LIGHTCONTAINER = 2
+
+
+# === TYPEDEFS ===
+
+class CollisionInfo(NamedTuple):
+    collision_type: CollisionType
+    pick_type: CollisionPickType
+
+    @classmethod
+    def from_value(cls, value: int):
+        collision_type = CollisionType(value & 0xFF)
+        pick_type = CollisionPickType((value >> 8) & 0xFF)
+        return cls(collision_type, pick_type)
+
+
+# === CLASSES ===
+
+class Material:
+    def __init__(self):
+        self.path: str = ""
+        self.is_skin: bool = False
+        self.alpha_enabled: bool = False
+        self.two_sided: bool = False
+        self.alpha_test_enabled: bool = False
+        self.alpha_ref_enabled: bool = False
+        self.z_write_enabled: bool = False
+        self.z_test_enabled: bool = False
+        self.blending_mode: BlendMode = BlendMode.NONE
+        self.specular_enabled: bool = False
+        self.alpha: float = 1.0
+        self.glow_type: GlowType = GlowType.NONE
+        self.red: float = 1.0
+        self.green: float = 1.0
+        self.blue: float = 1.0
+
+    def __repr__(self):
+        return f"Material(path='{self.path}', alpha={self.alpha}, glow={self.glow_type})"
+
+
+class Effect:
+    def __init__(self):
+        self.path: str = ""
+        self.effect_type: EffectType = EffectType.NORMAL
+        self.flags: Dict[int, Any] = {}
+
+    def __repr__(self):
+        return f"Effect(path='{self.path}', type={self.effect_type})"
+
+
+class Object:
+    def __init__(self):
+        self.bounding_radius: int = 0
+        self.bounding_x: int = 0
+        self.bounding_y: int = 0
+        self.mesh_count: int = 0
+        self.meshes: List[Dict] = []  # [ {'mesh_id': 0, 'material_id': 0, 'flags': {...}} ]
+        self.effects: List[Effect] = []
+        self.min_bounds: Vector3 = Vector3()
+        self.max_bounds: Vector3 = Vector3()
+
+    def __repr__(self):
+        return f"Object(meshes={len(self.meshes)}, effects={len(self.effects)})"
+
+
+class Zsc:
+    def __init__(self, filepath: str):
+        self.filepath = filepath
+        self.meshes: List[str] = []
+        self.materials: List[Material] = []
+        self.effects: List[str] = []
+        self.objects: List[Object] = []
+        self.load(filepath)
+
+    def __repr__(self):
+        return f"Zsc(file='{self.filepath}', meshes={len(self.meshes)}, materials={len(self.materials)}, objects={len(self.objects)})"
+
+    def load(self, filepath: str):
+        """Load and parse the ZSC file with logging for debugging."""
+        try:
+            with open(filepath, "rb") as f:
+                def read_u32_logged():
+                    start_offset = f.tell()
+                    try:
+                        val = read_u32(f)
+                        print(f"[{start_offset:08X}] read_u32 -> {val}")
+                        return val
+                    except Exception as e:
+                        print(f"[{start_offset:08X}] read_u32 -> ERROR: {e}")
+                        raise
+                def read_u16_logged():
+                    start_offset = f.tell()
+                    try:
+                        val = read_u16(f)
+                        print(f"[{start_offset:08X}] read_u16 -> {val}")
+                        return val
+                    except Exception as e:
+                        print(f"[{start_offset:08X}] read_u16 -> ERROR: {e}")
+                        raise
+
+                def read_u8_logged():
+                    start_offset = f.tell()
+                    try:
+                        val = int.from_bytes(f.read(1), 'little')
+                        print(f"[{start_offset:08X}] read_u8 -> {val}")
+                        return val
+                    except Exception as e:
+                        print(f"[{start_offset:08X}] read_u8 -> ERROR: {e}")
+                        raise
+
+                def read_f32_logged():
+                    start_offset = f.tell()
+                    try:
+                        val = read_f32(f)
+                        print(f"[{start_offset:08X}] read_f32 -> {val}")
+                        return val
+                    except Exception as e:
+                        print(f"[{start_offset:08X}] read_f32 -> ERROR: {e}")
+                        raise
+
+                def read_str_logged():
+                    start_offset = f.tell()
+                    try:
+                        val = read_str(f)
+                        print(f"[{start_offset:08X}] read_str -> '{val}'")
+                        return val
+                    except Exception as e:
+                        print(f"[{start_offset:08X}] read_str -> ERROR: {e}")
+                        raise
+
+                def read_vec3_logged():
+                    start_offset = f.tell()
+                    try:
+                        val = read_vector3_f32(f)
+                        print(f"[{start_offset:08X}] read_vector3_f32 -> {val}")
+                        return val
+                    except Exception as e:
+                        print(f"[{start_offset:08X}] read_vector3_f32 -> ERROR: {e}")
+                        raise
+
+                def read_quat_logged():
+                    start_offset = f.tell()
+                    try:
+                        val = read_quat_wxyz(f)
+                        print(f"[{start_offset:08X}] read_quat_wxyz -> {val}")
+                        return val
+                    except Exception as e:
+                        print(f"[{start_offset:08X}] read_quat_wxyz -> ERROR: {e}")
+                        raise
+
+
+                # --- Meshes ---
+                mesh_count = read_u16_logged()
+                #self.report({'INFO'}, f"mesh_count is : {mesh_count}")
+                print(f"mesh_count is : {mesh_count}")
+                #self.meshes = [read_str_logged() for _ in range(mesh_count)]
+                self.meshes = []
+                for _ in range(mesh_count):
+                    mesh = read_str_logged()
+                    self.meshes.append(mesh)
+                    #self.report({'INFO'}, f"mesh str is : {mesh}")
+                    print(f"mesh str is : {mesh}")
+                
+                # --- Materials ---
+                material_count = read_u16_logged()
+                #self.report({'INFO'}, f"material_count is : {material_count}")
+                print(f"material_count is : {material_count}")
+
+                for _ in range(material_count):
+                    mat = Material()
+                    mat.path = read_str_logged()
+                    mat.is_skin = bool(read_u16_logged())
+                    mat.alpha_enabled = bool(read_u16_logged())
+                    mat.two_sided = bool(read_u16_logged())
+                    alpha_test_enabled = bool(read_u16_logged())
+                    alpha_ref = read_u16_logged() / 256.0
+                    mat.z_write_enabled = bool(read_u16_logged())
+                    mat.z_test_enabled = bool(read_u16_logged())
+                    mat.blending_mode = BlendMode(read_u16_logged())
+                    mat.specular_enabled = bool(read_u16_logged())
+                    mat.alpha = read_f32_logged()
+                    glow_type_val = read_u16_logged()
+                    if glow_type_val not in GlowType._value2member_map_:
+                        raise ValueError(f"{glow_type_val} is not a valid GlowType")
+                    mat.glow_type = GlowType(glow_type_val)
+                    glow_color = read_vec3_logged()
+                    mat.red, mat.green, mat.blue = glow_color.x, glow_color.y, glow_color.z
+                    if not alpha_test_enabled:
+                        mat.alpha_ref_enabled = False
+                    self.materials.append(mat)
+
+                # --- Effects ---
+                print("Beggining effects")
+                effect_count = read_u16_logged()
+                print(f"effect_count is {effect_count}")
+                self.effects = [read_str_logged() for _ in range(effect_count)]
+
+                # --- Objects ---
+                print("Beggining objects")
+                object_count = read_u16_logged()
+                print(f"object_count is {object_count}")
+
+                for _ in range(object_count):
+                    obj = Object()
+                    f.seek(12, 1)
+                    print(f"Starting OBJ")
+                    print(f"skipping ahead 12 bytes")
+                    #obj.bounding_radius = read_u32_logged()
+                    #print(f"bounding_radius is {obj.bounding_radius}")
+                    #obj.bounding_x = read_u32_logged()
+                    #print(f"bounding_x is {obj.bounding_x}")
+                    #obj.bounding_y = read_u32_logged()
+                    #print(f"bounding_y is {obj.bounding_y}")
+
+                    obj.mesh_count = read_u16_logged()
+                    print(f"mesh_count is {obj.mesh_count}")
+
+                    if obj.mesh_count > 0:
+                        for _ in range(obj.mesh_count):
+                            mesh_id = read_u16_logged()
+                            print(f"mesh_id is {mesh_id}")
+
+                            material_id = read_u16_logged()
+                            print(f"material_id is {material_id}")
+
+                            flags = {}
+                            while True:
+                                flag_id = read_u8_logged()
+                                print(f"flag_id is {flag_id}")
+                                if flag_id == 0:
+                                    break
+                                flag_size = read_u8_logged()
+                                print(f"flag_size is {flag_size}")
+                                f.read(flag_size)  # skip data for brevity in logging
+                            obj.meshes.append({
+                                'mesh_id': mesh_id,
+                                'material_id': material_id,
+                                'flags': flags
+                            })
+
+                        # --- Bounding Box ---
+                        obj.min_bounds = read_vec3_logged()
+                        print(f"min_bounds is {obj.min_bounds}")
+
+                        obj.max_bounds = read_vec3_logged()
+                        print(f"max_bounds is {obj.max_bounds}")
+
+
+
+                    self.objects.append(obj)
+
+        except Exception as e:
+            offset = f.tell() if 'f' in locals() else 0
+            raise RuntimeError(f"Failed to load ZSC file '{filepath}' at offset {offset}: {e}")
