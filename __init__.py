@@ -17,6 +17,7 @@ else:
     from .import_zmd import ImportZMD
     from .import_zms import ImportZMS
     from .export_zms import ExportZMS
+    from .import_zsc import ImportZSC
 
 import bpy
 
@@ -33,17 +34,18 @@ def register():
     bpy.utils.register_class(ImportMap)
     bpy.utils.register_class(ImportZMD)
     bpy.utils.register_class(ImportZMS)
-    bpy.types.TOPBAR_MT_file_import.append(menu)
     bpy.utils.register_class(ExportZMS)
+    bpy.types.TOPBAR_MT_file_import.append(menu)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
+    bpy.utils.register_class(ImportZSC)
 
 def unregister():
     bpy.utils.unregister_class(ImportMap)
     bpy.utils.unregister_class(ImportZMD)
     bpy.utils.unregister_class(ImportZMS)
-    #bpy.types.INFO_MT_file_import.remove(menu)
-    bpy.types.TOPBAR_MT_file_import.remove(menu)
     bpy.utils.unregister_class(ExportZMS)
+    bpy.types.TOPBAR_MT_file_import.remove(menu)
+    bpy.utils.unregister_class(ImportZSC)
 
 if __name__ == "__main__":
     register()
