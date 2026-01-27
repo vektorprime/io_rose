@@ -1,6 +1,6 @@
 bl_info = {
     "name": "ROSE Online blender plugin",
-    "author": "Ralph Minderhoud",
+    "author": "Ralph Minderhoud and Ryko",
     "blender": (2, 77, 0),
     "version": (0, 0, 4),
     "location": "File > Import",

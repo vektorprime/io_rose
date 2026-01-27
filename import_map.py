@@ -90,6 +90,73 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         except Exception:
             return "UNKNOWN"
     
+    def create_terrain_materials(self, zon_path, texture_paths):
+        """
+        Create a material for each texture in the ZON file.
+        
+        Args:
+            zon_path: Path to the ZON file
+            texture_paths: List of texture paths from ZON Textures block
+        
+        Returns:
+            List of materials, one per texture
+        """
+        materials = []
+        ##self.report({'INFO'}, f"Creating materials for {len(texture_paths)} textures")
+        
+        for idx, texture_path in enumerate(texture_paths):
+            ###self.report({'INFO'}, f"Processing texture {idx}: {texture_path}")
+            resolved_path = self.resolve_texture_path(zon_path, texture_path)
+            ###self.report({'INFO'}, f"  Resolved path: {resolved_path}")
+            
+            if resolved_path and Path(resolved_path).exists():
+                try:
+                    # Create material
+                    mat = bpy.data.materials.new(name=f"ROSE_Terrain_{idx}")
+                    mat.use_nodes = True
+                    nodes = mat.node_tree.nodes
+                    links = mat.node_tree.links
+                    
+                    nodes.clear()
+                    
+                    # Texture node
+                    tex_node = nodes.new(type='ShaderNodeTexImage')
+                    tex_node.location = (-400, 0)
+                    
+                    # Load image
+                    image = bpy.data.images.get(Path(resolved_path).name)
+                    if not image:
+                        ###self.report({'INFO'}, f"  Loading new image: {resolved_path}")
+                        image = bpy.data.images.load(resolved_path)
+                    #else:
+                        ###self.report({'INFO'}, f"  Using existing image: {image.name}")
+                    tex_node.image = image
+                    
+                    # Shader
+                    bsdf = nodes.new(type='ShaderNodeBsdfPrincipled')
+                    bsdf.location = (0, 0)
+                    
+                    output = nodes.new(type='ShaderNodeOutputMaterial')
+                    output.location = (400, 0)
+                    
+                    # Connect
+                    links.new(tex_node.outputs["Color"], bsdf.inputs["Base Color"])
+                    links.new(bsdf.outputs["BSDF"], output.inputs["Surface"])
+                    
+                    materials.append(mat)
+                    ###self.report({'INFO'}, f"  Created material {mat.name} for texture {idx}")
+                except Exception as e:
+                    self.report({'WARNING'}, f"  Failed to create material for {texture_path}: {e}")
+                    materials.append(None)
+            else:
+                self.report({'WARNING'}, f"  Texture not found: {texture_path}")
+                materials.append(None)
+        
+        success_count = len([m for m in materials if m is not None])
+        fail_count = len([m for m in materials if m is None])
+        ##self.report({'INFO'}, f"Finished creating materials: {success_count} successful, {fail_count} failed")
+        return materials
+
     def create_terrain_material(self, zon_path, texture_paths):
         """Create a material with the first available texture."""
         mat = bpy.data.materials.new(name="ROSE_Terrain_Material")
@@ -113,9 +180,9 @@ class ImportMap(bpy.types.Operator, ImportHelper):
 
         if texture_path:
             tex_node.image = bpy.data.images.load(texture_path)
-            self.report({'INFO'}, f"Loaded texture: {texture_path}")
+            ###self.report({'INFO'}, f"Loaded texture: {texture_path}")
         else:
-            self.report({'WARNING'}, "No texture loaded for material.")
+            #self.report({'WARNING'}, "No texture loaded for material.")
             tex_node.image = None
 
         # Create Principled BSDF
@@ -140,6 +207,9 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         # Normalize path separators
         texture_relative = texture_path.replace('\\', os.sep)
 
+        ##self.report({'INFO'}, f"  Resolving texture: {texture_path}")
+        ##self.report({'INFO'}, f"  ZON directory: {zon_dir}")
+
         # Try to find 3DDATA root
         current = zon_dir
         max_depth = 10
@@ -154,31 +224,138 @@ class ImportMap(bpy.types.Operator, ImportHelper):
             depth += 1
 
         if not root_3ddata:
-            self.report({'WARNING'}, "Could not find 3DDATA root. Texture resolution failed.")
+            self.report({'WARNING'}, "  Could not find 3DDATA root. Texture resolution failed.")
             return None
+
+        ##self.report({'INFO'}, f"  Found 3DDATA root: {root_3ddata}")
 
         # Try exact path
         full_path = root_3ddata / texture_relative
+        ##self.report({'INFO'}, f"  Trying exact path: {full_path}")
         if full_path.exists():
+            ##self.report({'INFO'}, f"  Found at exact path: {full_path}")
             return str(full_path)
 
         # Try parent of 3DDATA
         full_path = root_3ddata.parent / texture_relative
+        ##self.report({'INFO'}, f"  Trying parent path: {full_path}")
         if full_path.exists():
+            ##self.report({'INFO'}, f"  Found at parent path: {full_path}")
             return str(full_path)
 
         # Try case-insensitive search
+        ##self.report({'INFO'}, f"  Trying case-insensitive search...")
         for path in [root_3ddata, root_3ddata.parent]:
             try:
                 for file in path.rglob('*'):
                     if file.name.lower() == Path(texture_relative).name.lower():
-                        self.report({'INFO'}, f"Found texture via case-insensitive match: {file}")
+                        ##self.report({'INFO'}, f"  Found texture via case-insensitive match: {file}")
                         return str(file)
             except Exception:
                 continue
 
-        self.report({'WARNING'}, f"Texture not found: {texture_relative}")
+        self.report({'WARNING'}, f"  Texture not found: {texture_relative}")
         return None
+
+
+    def create_terrain_texture_atlas(self, zon_path, texture_paths):
+        """
+        Create a texture atlas combining all terrain textures.
+        Uses efficient buffer operations instead of per-pixel loops.
+        """
+        import numpy as np
+        
+        self.report({'INFO'}, f"Creating texture atlas for {len(texture_paths)} textures")
+        
+        # Load all texture images
+        images = []
+        max_width = 0
+        max_height = 0
+        
+        for idx, tex_path in enumerate(texture_paths):
+            resolved_path = self.resolve_texture_path(zon_path, tex_path)
+            if resolved_path and Path(resolved_path).exists():
+                try:
+                    img = bpy.data.images.load(resolved_path)
+                    # Ensure we float buffer for faster access
+                    img.use_half_precision = False
+                    images.append(img)
+                    max_width = max(max_width, img.size[0])
+                    max_height = max(max_height, img.size[1])
+                    self.report({'INFO'}, f"  Loaded texture {idx}: {img.size[0]}x{img.size[1]}")
+                except Exception as e:
+                    self.report({'WARNING'}, f"  Failed to load texture {idx}: {e}")
+                    images.append(None)
+            else:
+                self.report({'WARNING'}, f"  Texture {idx} not found: {tex_path}")
+                images.append(None)
+        
+        # Filter out None images but keep indices
+        valid_images = [(i, img) for i, img in enumerate(images) if img is not None]
+        
+        if not valid_images:
+            self.report({'ERROR'}, "No valid textures found for atlas")
+            return None, {}
+        
+        # Calculate atlas dimensions (4xN grid)
+        textures_per_row = 4
+        num_rows = (len(valid_images) + textures_per_row - 1) // textures_per_row
+        atlas_width = max_width * textures_per_row
+        atlas_height = max_height * num_rows
+        
+        self.report({'INFO'}, f"Atlas size: {atlas_width}x{atlas_height} ({textures_per_row}x{num_rows})")
+        
+        # Create atlas image with numpy for speed
+        atlas_name = "ROSE_Terrain_Atlas"
+        try:
+            atlas = bpy.data.images.new(atlas_name, width=atlas_width, height=atlas_height, alpha=True, float_buffer=True)
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to create atlas: {e}")
+            return None, {}
+        
+        # Create numpy array for atlas (RGBA)
+        atlas_array = np.zeros((atlas_height, atlas_width, 4), dtype=np.float32)
+        
+        # Build atlas info and copy textures
+        atlas_info = {}
+        for idx, (original_idx, img) in enumerate(valid_images):
+            row = idx // textures_per_row
+            col = idx % textures_per_row
+            x = col * max_width
+            y = row * max_height
+            
+            img_w, img_h = img.size[0], img.size[1]
+            
+            # Get pixels as numpy array (faster than Python loops)
+            # Blender stores as flat RGBA array
+            pixels = np.array(img.pixels[:])
+            img_array = pixels.reshape((img_h, img_w, 4))
+            
+            # Flip Y for Blender's bottom-up coordinate system and place in atlas
+            # Calculate destination coordinates (top-left origin for numpy)
+            dst_y_start = (num_rows - 1 - row) * max_height
+            dst_x_start = col * max_width
+            
+            # Place image (handling different sizes)
+            atlas_array[dst_y_start:dst_y_start + img_h, dst_x_start:dst_x_start + img_w] = img_array
+            
+            # Store atlas region info (UV space, 0-1)
+            atlas_info[original_idx] = {
+                'x': x, 'y': y,
+                'width': img_w, 'height': img_h,
+                'u_min': x / atlas_width,
+                'v_min': y / atlas_height,
+                'u_max': (x + img_w) / atlas_width,
+                'v_max': (y + img_h) / atlas_height
+            }
+        
+        # Assign pixels back to Blender (flatten array)
+        atlas.pixels = atlas_array.flatten().tolist()
+        atlas.update()
+        
+        self.report({'INFO'}, f"Atlas created with {len(valid_images)} textures")
+        return atlas, atlas_info
+
 
     def get_map_name(self):
         # Returns the folder name for the map; example: JUNON for files that contain "JPT"
@@ -207,6 +384,10 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         return filepath.parent.parent.parent.parent
 
     def execute(self, context):
+        import time
+        start_time = time.time()
+        wm = context.window_manager
+        wm.progress_begin(0, 100)
         # Get paths based on file structure
         # Expected: 3DDATA/MAPS/JUNON/JPT01/30_30.ZON
         filepath = Path(self.filepath).resolve()
@@ -223,9 +404,9 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         map_name = self.get_map_name()  # e.g., "JUNON"
         zone_code = self.get_zone_code()  # e.g., "JPT", "JD", "JG"
         
-        self.report({'INFO'}, f"3DDATA root: {root_3ddata}")
-        self.report({'INFO'}, f"Map name: {map_name}")
-        self.report({'INFO'}, f"Zone code: {zone_code}")
+        ##self.report({'INFO'}, f"3DDATA root: {root_3ddata}")
+        ##self.report({'INFO'}, f"Map name: {map_name}")
+        ##self.report({'INFO'}, f"Zone code: {zone_code}")
         
         # Load ZSC files: 3DDATA/JUNON/LIST_CNST_JPT.ZSC
         zsc_cnst_path = root_3ddata / map_name / f"LIST_CNST_{zone_code}.ZSC"
@@ -237,7 +418,7 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         if zsc_cnst_path.exists():
             try:
                 zsc_cnst = Zsc(str(zsc_cnst_path))
-                self.report({'INFO'}, f"Loaded CNST ZSC: {len(zsc_cnst.meshes)} meshes, {len(zsc_cnst.objects)} objects")
+                ##self.report({'INFO'}, f"Loaded CNST ZSC: {len(zsc_cnst.meshes)} meshes, {len(zsc_cnst.objects)} objects")
             except Exception as e:
                 self.report({'WARNING'}, f"Failed to load CNST ZSC: {e}")
         else:
@@ -246,13 +427,13 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         if zsc_deco_path.exists():
             try:
                 zsc_deco = Zsc(str(zsc_deco_path))
-                self.report({'INFO'}, f"Loaded DECO ZSC: {len(zsc_deco.meshes)} meshes, {len(zsc_deco.objects)} objects")
+                ##self.report({'INFO'}, f"Loaded DECO ZSC: {len(zsc_deco.meshes)} meshes, {len(zsc_deco.objects)} objects")
             except Exception as e:
                 self.report({'WARNING'}, f"Failed to load DECO ZSC: {e}")
         else:
             self.report({'WARNING'}, f"DECO ZSC not found: {zsc_deco_path}")
         
-        self.report({'INFO'}, "Starting map import process")
+        ##self.report({'INFO'}, "Starting map import process")
         him_ext = ".HIM"
         til_ext = ".TIL"
         ifo_ext = ".IFO"
@@ -266,9 +447,11 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         zon = Zon(self.filepath)
         zon_dir = os.path.dirname(self.filepath)
 
-        self.report({'INFO'}, f"Loaded ZON file: {self.filepath}")
-        self.report({'INFO'}, f"Zone dimensions: {zon.width} x {zon.length}")
-        self.report({'INFO'}, f"Found {len(zon.textures)} textures in ZON file")
+        ##self.report({'INFO'}, f"Loaded ZON file: {self.filepath}")
+        ##self.report({'INFO'}, f"Zone dimensions: {zon.width} x {zon.length}")
+        ##self.report({'INFO'}, f"Found {len(zon.textures)} textures in ZON file")
+        #for idx, tex in enumerate(zon.textures):
+            ##self.report({'INFO'}, f"  Texture {idx}: {tex}")
 
         tiles = SimpleNamespace()
         tiles.min_pos = Vector2(999, 999)
@@ -277,7 +460,7 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         tiles.count = 0
         tiles.coords = []
 
-        self.report({'INFO'}, "Scanning directory for HIM files...")
+        ##self.report({'INFO'}, "Scanning directory for HIM files...")
         for file in os.listdir(zon_dir):
             if file.endswith(him_ext):
                 x, y = map(int, file.split(".")[0].split("_"))
@@ -296,14 +479,14 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         tiles.dimension.x = tiles.max_pos.x - tiles.min_pos.x + 1
         tiles.dimension.y = tiles.max_pos.y - tiles.min_pos.y + 1
 
-        self.report({'INFO'}, f"Detected tile grid: {tiles.dimension.x} x {tiles.dimension.y}")
+        ##self.report({'INFO'}, f"Detected tile grid: {tiles.dimension.x} x {tiles.dimension.y}")
 
         tiles.indices = list_2d(tiles.dimension.y, tiles.dimension.x)
         tiles.hims = list_2d(tiles.dimension.y, tiles.dimension.x)
         tiles.tils = list_2d(tiles.dimension.y, tiles.dimension.x)
         tiles.ifos = list_2d(tiles.dimension.y, tiles.dimension.x)
 
-        self.report({'INFO'}, "Loading HIM/TIL/IFO files...")
+        ##self.report({'INFO'}, "Loading HIM/TIL/IFO files...")
         for x, y in tiles.coords:
             tile_name = "{}_{}".format(x, y)
             him_file = os.path.join(zon_dir, tile_name + him_ext)
@@ -318,12 +501,22 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                 til = Til(til_file)
                 him.indices = list_2d(him.width, him.length)
                 
+                # Log tile_index values from TIL
+                if til and til.tiles:
+                    # Sample a few tile_index values
+                    sample_indices = []
+                    for row_idx in range(min(5, len(til.tiles))):
+                        for col_idx in range(min(5, len(til.tiles[0]))):
+                            patch = til.tiles[row_idx][col_idx]
+                            sample_indices.append(patch.tile_index)
+                    ##self.report({'INFO'}, f"  TIL tile_index samples: {sample_indices[:10]}")
+                
                 # Load IFO if exists
                 ifo = None
                 if os.path.exists(ifo_file):
                     try:
                         ifo = Ifo(ifo_file)
-                        self.report({'INFO'}, f"Loaded IFO {tile_name}: {len(ifo.cnst_objects)} CNST, {len(ifo.deco_objects)} DECO")
+                        ##self.report({'INFO'}, f"Loaded IFO {tile_name}: {len(ifo.cnst_objects)} CNST, {len(ifo.deco_objects)} DECO")
                     except Exception as e:
                         self.report({'WARNING'}, f"Failed to load IFO {tile_name}: {e}")
 
@@ -332,7 +525,7 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                 tiles.tils[norm_y][norm_x] = til
                 tiles.ifos[norm_y][norm_x] = ifo
 
-                self.report({'INFO'}, f"Loaded tile: {tile_name}")
+                ##self.report({'INFO'}, f"Loaded tile: {tile_name}")
             except Exception as e:
                 self.report({'WARNING'}, f"Failed to load tile {tile_name}: {e}")
 
@@ -355,7 +548,7 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         edges = []
         faces = []
 
-        self.report({'INFO'}, "Generating terrain mesh...")
+        ##self.report({'INFO'}, "Generating terrain mesh...")
         for y in range(tiles.dimension.y):
             for x in range(tiles.dimension.x):
                 indices = tiles.indices[y][x]
@@ -380,7 +573,7 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                             faces.append((v1, v2, v3, v4))
 
         # Generate inter-tile connections
-        self.report({'INFO'}, "Generating inter-tile connections...")
+        ##self.report({'INFO'}, "Generating inter-tile connections...")
         for y in range(tiles.dimension.y):
             for x in range(tiles.dimension.x):
                 indices = tiles.indices[y][x]
@@ -431,19 +624,179 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         mesh.from_pydata(vertices, edges, faces)
         mesh.update()
 
-        # Add UVs
-        mesh.uv_layers.new(name="UVMap")
-        for loop_idx, loop in enumerate(mesh.loops):
-            vi = loop.vertex_index
-            u = (vertices[vi][0] % 1.0)
-            v = (vertices[vi][1] % 1.0)
-            mesh.uv_layers["UVMap"].data[loop_idx].uv = (u, 1 - v)
-
-        # Apply material
+        # Apply materials based on tile_index
+                # Apply materials based on tile_index
         if self.load_texture and zon.textures:
-            mat = self.create_terrain_material(self.filepath, [zon.textures[0]])
-            mesh.materials.append(mat)
-
+            self.report({'INFO'}, f"Starting material assignment...")
+            
+            # Build vertex-to-tile mapping to avoid O(n^2) search
+            self.report({'INFO'}, "Building vertex tile map...")
+            vertex_tile_map = {}
+            for ty in range(tiles.dimension.y):
+                for tx in range(tiles.dimension.x):
+                    him = tiles.hims[ty][tx]
+                    if not him:
+                        continue
+                    offset_x = tiles.offsets[ty][tx].x
+                    offset_y = tiles.offsets[ty][tx].y
+                    til = tiles.tils[ty][tx]
+                    
+                    # Map each vertex in this tile to its tile data
+                    for vy in range(him.length):
+                        for vx in range(him.width):
+                            global_vi = him.indices[vy][vx]
+                            # Store: tile coords, offsets, local coords, and TIL reference
+                            vertex_tile_map[global_vi] = (tx, ty, offset_x, offset_y, vx, vy, til)
+            
+            self.report({'INFO'}, f"Mapped {len(vertex_tile_map)} vertices to tiles")
+            
+            # Create texture atlas
+            atlas_image, atlas_info = self.create_terrain_texture_atlas(self.filepath, zon.textures)
+            
+            if atlas_image is None:
+                # Fallback to old method (individual materials)
+                self.report({'WARNING'}, "Atlas creation failed, falling back to individual materials")
+                texture_materials = self.create_terrain_materials(self.filepath, zon.textures)
+                
+                if texture_materials:
+                    mesh.materials.clear()
+                    for mat in texture_materials:
+                        if mat:
+                            mesh.materials.append(mat)
+                    
+                    # Simple material assignment without atlas
+                    for face_idx, face in enumerate(faces):
+                        vi = face[0]
+                        if vi in vertex_tile_map:
+                            tx, ty, _, _, _, _, til = vertex_tile_map[vi]
+                            if til and til.tiles:
+                                # Get any vertex from face to determine tile position
+                                vx, vy, _ = vertices[vi]
+                                local_x = int(vx - tiles.offsets[ty][tx].x)
+                                local_y = int(vy - tiles.offsets[ty][tx].y)
+                                
+                                if 0 <= local_y < len(til.tiles) and 0 <= local_x < len(til.tiles[0]):
+                                    patch = til.tiles[local_y][local_x]
+                                    if patch.tile_index < len(zon.tiles):
+                                        zon_tile = zon.tiles[patch.tile_index]
+                                        texture_index = zon_tile.layer1
+                                        if texture_index < len(texture_materials) and texture_materials[texture_index]:
+                                            mesh.polygons[face_idx].material_index = texture_index
+            else:
+                # Use atlas-based approach with CORRECTED UVs
+                self.report({'INFO'}, "Using texture atlas with corrected UVs")
+                
+                # Create single material with atlas
+                mat = bpy.data.materials.new(name="ROSE_Terrain_Atlas_Material")
+                mat.use_nodes = True
+                nodes = mat.node_tree.nodes
+                links = mat.node_tree.links
+                nodes.clear()
+                
+                tex_node = nodes.new(type='ShaderNodeTexImage')
+                tex_node.location = (-400, 0)
+                tex_node.image = atlas_image
+                tex_node.interpolation = 'Closest'  # Sharp pixelated look for game textures
+                
+                bsdf = nodes.new(type='ShaderNodeBsdfPrincipled')
+                bsdf.location = (0, 0)
+                
+                output = nodes.new(type='ShaderNodeOutputMaterial')
+                output.location = (400, 0)
+                
+                links.new(tex_node.outputs["Color"], bsdf.inputs["Base Color"])
+                links.new(tex_node.outputs["Alpha"], bsdf.inputs["Alpha"])
+                links.new(bsdf.outputs["BSDF"], output.inputs["Surface"])
+                
+                mat.blend_method = 'OPAQUE'  # Use clip or blend if needed
+                
+                mesh.materials.clear()
+                mesh.materials.append(mat)
+                
+                # Create UV layer
+                if not mesh.uv_layers:
+                    mesh.uv_layers.new(name="UVMap")
+                
+                # Assign UVs with CORRECTED calculations
+                self.report({'INFO'}, f"Assigning UVs to {len(faces)} faces...")
+                uv_layer = mesh.uv_layers["UVMap"].data
+                
+                for face_idx, face in enumerate(faces):
+                    # Get tile info from first vertex
+                    vi = face[0]
+                    if vi not in vertex_tile_map:
+                        continue
+                    
+                    tx, ty, offset_x, offset_y, local_vx, local_vy, til = vertex_tile_map[vi]
+                    him = tiles.hims[ty][tx]
+                    
+                    if not til or not til.tiles:
+                        continue
+                    
+                    # Get the tile_index from TIL at this position
+                    patch_x = min(local_vx, len(til.tiles[0]) - 1)
+                    patch_y = min(local_vy, len(til.tiles) - 1)
+                    patch = til.tiles[patch_y][patch_x]
+                    
+                    if patch.tile_index >= len(zon.tiles):
+                        continue
+                    
+                    zon_tile = zon.tiles[patch.tile_index]
+                    texture_index = zon_tile.layer1
+                    
+                    if texture_index not in atlas_info:
+                        continue
+                    
+                    region = atlas_info[texture_index]
+                    
+                    # Calculate UVs for each vertex in face
+                    for i, vertex_idx in enumerate(face):
+                        vx, vy, vz = vertices[vertex_idx]
+                        
+                        # FIX: Calculate local position within the tile properly
+                        # Convert global coordinates to local tile coordinates (0 to 1)
+                        local_x = vx - offset_x
+                        local_y = vy - offset_y
+                        
+                        # Normalize to 0-1 range based on tile dimensions
+                        tile_width = him.width
+                        tile_height = him.length
+                        
+                        u_local = (local_x % tile_width) / tile_width if tile_width > 0 else 0
+                        v_local = (local_y % tile_height) / tile_height if tile_height > 0 else 0
+                        
+                        # Apply tile rotation from ZON data
+                        rot = zon_tile.rotation
+                        if rot == 2:  # FlipHorizontal
+                            u_local = 1.0 - u_local
+                        elif rot == 3:  # FlipVertical
+                            v_local = 1.0 - v_local
+                        elif rot == 4:  # Flip both
+                            u_local = 1.0 - u_local
+                            v_local = 1.0 - v_local
+                        elif rot == 5:  # Clockwise90
+                            u_local, v_local = v_local, 1.0 - u_local
+                        elif rot == 6:  # CounterClockwise90
+                            u_local, v_local = 1.0 - v_local, u_local
+                        
+                        # Apply offsets (if any)
+                        if zon_tile.offset1 != 0 or zon_tile.offset2 != 0:
+                            tex_width = region['width']
+                            tex_height = region['height']
+                            if tex_width > 0:
+                                u_local = (u_local + zon_tile.offset1 / tex_width) % 1.0
+                            if tex_height > 0:
+                                v_local = (v_local + zon_tile.offset2 / tex_height) % 1.0
+                        
+                        # Map to atlas region
+                        atlas_u = region['u_min'] + u_local * (region['u_max'] - region['u_min'])
+                        atlas_v = region['v_min'] + v_local * (region['v_max'] - region['v_min'])
+                        
+                        # Assign to UV layer (Blender V is flipped)
+                        loop_idx = mesh.polygons[face_idx].loop_start + i
+                        uv_layer[loop_idx].uv = (atlas_u, 1.0 - atlas_v)
+                
+                self.report({'INFO'}, "UV assignment complete")
         mesh.update(calc_edges=True)
 
         # Create terrain object
@@ -483,7 +836,7 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                     for obj_inst in ifo.deco_objects:
                         used_deco_objects.add(obj_inst.object_id)
         
-        self.report({'INFO'}, f"Found {len(used_cnst_objects)} unique CNST objects, {len(used_deco_objects)} unique DECO objects referenced in IFO files")
+        ##self.report({'INFO'}, f"Found {len(used_cnst_objects)} unique CNST objects, {len(used_deco_objects)} unique DECO objects referenced in IFO files")
         
         # Pre-create materials only for used objects
         if zsc_cnst:
@@ -494,7 +847,7 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                     for part in zsc_cnst.objects[obj_id].parts:
                         used_materials.add(part.material_id)
             
-            self.report({'INFO'}, f"Loading {len(used_materials)} CNST materials")
+            ##self.report({'INFO'}, f"Loading {len(used_materials)} CNST materials")
             for mat_id in used_materials:
                 if mat_id < len(zsc_cnst.materials):
                     material_cache_cnst[mat_id] = self.create_zsc_material(zsc_cnst.materials[mat_id], root_3ddata)
@@ -507,7 +860,7 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                     for part in zsc_deco.objects[obj_id].parts:
                         used_materials.add(part.material_id)
             
-            self.report({'INFO'}, f"Loading {len(used_materials)} DECO materials")
+            ##self.report({'INFO'}, f"Loading {len(used_materials)} DECO materials")
             for mat_id in used_materials:
                 if mat_id < len(zsc_deco.materials):
                     material_cache_deco[mat_id] = self.create_zsc_material(zsc_deco.materials[mat_id], root_3ddata)
@@ -541,8 +894,8 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                         total_cnst += 1
                         spawned_this_tile += 1
                     
-                    if spawned_this_tile > 0:
-                        self.report({'INFO'}, f"Tile ({x},{y}): Spawned {spawned_this_tile} CNST objects")
+                    #if spawned_this_tile > 0:
+                        ##self.report({'INFO'}, f"Tile ({x},{y}): Spawned {spawned_this_tile} CNST objects")
                 
                 # Spawn DECO objects
                 if self.load_deco_objects and zsc_deco:
@@ -559,11 +912,11 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                         total_deco += 1
                         spawned_this_tile += 1
                     
-                    if spawned_this_tile > 0:
-                        self.report({'INFO'}, f"Tile ({x},{y}): Spawned {spawned_this_tile} DECO objects")
+                    #if spawned_this_tile > 0:
+                        ##self.report({'INFO'}, f"Tile ({x},{y}): Spawned {spawned_this_tile} DECO objects")
         
-        self.report({'INFO'}, f"Spawned {total_cnst} CNST objects, {total_deco} DECO objects")
-        self.report({'INFO'}, "Import completed successfully!")
+        ##self.report({'INFO'}, f"Spawned {total_cnst} CNST objects, {total_deco} DECO objects")
+        ##self.report({'INFO'}, "Import completed successfully!")
         return {"FINISHED"}
     
     def spawn_object(self, context, collection, zsc, ifo_object, material_cache, mesh_cache, base_path):
