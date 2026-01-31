@@ -206,6 +206,14 @@ def read_quat_wxyz(f):
     z = read_f32(f)
     return Quat(w, x, y, z)
 
+def read_quat_xyzw(f):
+    """Read quaternion in X,Y,Z,W order"""
+    x = read_f32(f)
+    y = read_f32(f)
+    z = read_f32(f)
+    w = read_f32(f)
+    return Quat(w, x, y, z)
+
 # Write functions (if needed for other formats)
 def write_i8(f, value):
     """Write signed 8-bit integer"""

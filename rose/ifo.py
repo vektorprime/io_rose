@@ -97,7 +97,7 @@ class Ifo:
         obj.object_id = read_u32(f)
         obj.minimap_position.x = read_u32(f)
         obj.minimap_position.y = read_u32(f)
-        obj.rotation = read_quat_wxyz(f)
+        obj.rotation = read_quat_xyzw(f)
         obj.position = read_vector3_f32(f)
         obj.scale = read_vector3_f32(f)
         return obj
