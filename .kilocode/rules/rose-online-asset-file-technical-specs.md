@@ -1,6 +1,4 @@
----
-description: A comprehensive overview about how the various Rose Online files the proejct works with are structured and how they interact with one another.
----
+# rose-online-asset-file-technical-specs.md
 
 # Rose Online Asset File Format Technical Specification
 Rose Online Asset File Technical Specs

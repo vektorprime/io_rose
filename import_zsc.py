@@ -117,6 +117,26 @@ class ImportZSC(bpy.types.Operator, ImportHelper):
         self.report({'INFO'}, f"Import completed!")
         return {"FINISHED"}
     
+    def convert_rose_quaternion_to_blender(self, rot):
+        """
+        Convert Rose Online quaternion to Blender quaternion.
+
+        Rose Online stores quaternions as (W, X, Y, Z).
+        Blender expects quaternions in (W, X, Y, Z) format.
+
+        The correct transformation for coordinate system conversion is:
+        (W, X, Y, Z) -> (X, Z, -Y, W)
+
+        This aligns with Blender's coordinate system (Y-up, forward -Y).
+
+        Args:
+            rot: Quaternion with (w, x, y, z) attributes
+            
+        Returns:
+            Tuple of (w, x, y, z) for Blender
+        """
+        return (rot.x, rot.z, -rot.y, rot.w)
+    
     def spawn_object(self, context, collection, zsc, ifo_object, material_cache, mesh_cache, base_path):
         """Spawn a ZSC object instance from IFO data"""
         zsc_obj = zsc.objects[ifo_object.object_id]
@@ -132,10 +152,10 @@ class ImportZSC(bpy.types.Operator, ImportHelper):
         pos = ifo_object.position
         parent_empty.location = (pos.x / 100.0, pos.z / 100.0, -pos.y / 100.0)
         
-        # Convert quaternion (W, X, Y, Z) -> Blender (W, X, Z, -Y)
+        # Convert quaternion (W, X, Y, Z) -> Blender (W, X, -Z, Y)
         rot = ifo_object.rotation
         parent_empty.rotation_mode = 'QUATERNION'
-        parent_empty.rotation_quaternion = (rot.w, rot.x, rot.z, -rot.y)
+        parent_empty.rotation_quaternion = (rot.w, rot.x, -rot.z, rot.y)
         
         # Scale
         parent_empty.scale = (ifo_object.scale.x, ifo_object.scale.z, ifo_object.scale.y)
@@ -182,7 +202,7 @@ class ImportZSC(bpy.types.Operator, ImportHelper):
         # Set transform (relative to parent)
         obj.location = (part.position.x / 100.0, part.position.z / 100.0, -part.position.y / 100.0)
         obj.rotation_mode = 'QUATERNION'
-        obj.rotation_quaternion = (part.rotation.w, part.rotation.x, part.rotation.z, -part.rotation.y)
+        obj.rotation_quaternion = (part.rotation.w, part.rotation.x, -part.rotation.z, part.rotation.y)
         obj.scale = (part.scale.x, part.scale.z, part.scale.y)
         
         return obj

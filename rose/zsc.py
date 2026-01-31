@@ -1,5 +1,6 @@
 # zsc.py - Rose Online ZSC Scene File Parser (Rust-Exact Match)
 from .utils import *
+from mathutils import Quaternion
 
 from enum import IntEnum
 from typing import List, Optional, NamedTuple, Dict, Any

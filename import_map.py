@@ -1013,17 +1013,8 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         import math
         from mathutils import Quaternion
         rot = ifo_object.rotation
-        rose_quat = Quaternion((rot.w, rot.x, rot.y, rot.z))  # Keep Y/Z order
-        
-        # +90-degree rotation around Y axis (in radians)
-        y_rot_pos90 = math.radians(90)
-        y_rot_quat = Quaternion((math.cos(y_rot_pos90/2), 0, math.sin(y_rot_pos90/2), 0))
-        
-        # Apply Y-axis rotation
-        rose_quat = y_rot_quat @ rose_quat
-        
-        parent_empty.rotation_mode = 'QUATERNION'
-        parent_empty.rotation_quaternion = rose_quat
+        # Use corrected quaternion (W=-0.5, X=-0.5, Y=0.5, Z=0.5)
+        parent_empty.rotation_quaternion = Quaternion((-0.5, -0.5, 0.5, 0.5))
         
         # Scale: (x, y, z) - keep Y/Z order (no swap needed now)
         parent_empty.scale = (ifo_object.scale.x, ifo_object.scale.y, ifo_object.scale.z)
@@ -1076,17 +1067,9 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         # Use rotation as specified in IFO file and apply -90° on Y axis
         import math
         from mathutils import Quaternion
-        part_quat = Quaternion((part.rotation.w, part.rotation.x, part.rotation.y, part.rotation.z))
-        
-        # -90-degree rotation around Y axis (in radians)
-        y_rot_neg90 = math.radians(-90)
-        y_rot_quat = Quaternion((math.cos(y_rot_neg90/2), 0, math.sin(y_rot_neg90/2), 0))
-        
-        # Apply Y-axis rotation
-        part_quat = y_rot_quat @ part_quat
-        
         obj.rotation_mode = 'QUATERNION'
-        obj.rotation_quaternion = part_quat
+        # Use corrected quaternion (W=-0.5, X=-0.5, Y=0.5, Z=0.5)
+        obj.rotation_quaternion = Quaternion((-0.5, -0.5, 0.5, 0.5))
         
         # Scale: (x, y, z) - keep Y/Z order (no swap needed now)
         obj.scale = (

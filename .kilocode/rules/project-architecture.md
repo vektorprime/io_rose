@@ -1,3 +1,5 @@
+# project-architecture.md
+
 # Rose Online Map Importer for Blender 4.5
 
 This project is a **Blender 4.5 Python plugin** that imports **Rose Online** game maps into Blender.  
@@ -51,7 +53,7 @@ Use this for:
 - Version-specific changes in Blender 4.5
 
 ### Blender 4.5 Source Code (GitHub)
-- [Blender 4.5 source github page](https://github.com/blender/blender/tree/blender-v4.5-release)
+- Blender 4.5 source code - C:\Users\vicha\RustroverProjects\blender
 
 Useful for:
 - Verifying API behavior
