@@ -23,7 +23,7 @@ class Til:
             
             self.tiles = list_2d(self.width, self.length)
 
-            for l in range(self.length-1, -1, -1):
+            for l in range(self.length):
                 for w in range(self.width):
                     t = TilPatch()
                     t.brush = read_i8(f)

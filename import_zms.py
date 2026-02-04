@@ -111,7 +111,18 @@ class ImportZMS(bpy.types.Operator, ImportHelper):
         #-- Vertices (vec3 positions)
         verts = []
         for v in zms.vertices:
-            verts.append((v.position.x, v.position.y, v.position.z))
+            # Convert Rose Online coordinates to Blender: (x, y, z) -> (x, z, -y)
+            verts.append((v.position.x, v.position.z, -v.position.y))
+
+        #-- Normals (transformed to match coordinate system)
+        normals = []
+        if zms.normals_enabled():
+            for v in zms.vertices:
+                # Convert normal coordinates: (nx, ny, nz) -> (nx, nz, -ny)
+                normals.append((v.normal.x, v.normal.z, -v.normal.y))
+        else:
+            # If no normals in file, let Blender compute them
+            normals = None
 
         #-- Faces (usvec3 = 3x uint16 indices)
         faces = []
@@ -120,6 +131,10 @@ class ImportZMS(bpy.types.Operator, ImportHelper):
 
         #-- Mesh
         mesh.from_pydata(verts, [], faces)
+        
+        #-- Set normals if available
+        if normals is not None:
+            mesh.normals_split_custom_set(normals)
 
         #-- UV (vec2 coordinates, up to 4 channels)
         if zms.uv1_enabled():

@@ -37,11 +37,11 @@ class Color4:
         return f"Color4({self.r}, {self.g}, {self.b}, {self.a})"
 
 class Quat:
-    def __init__(self, w=1.0, x=0.0, y=0.0, z=0.0):
-        self.w = w
+    def __init__(self, x=0.0, y=0.0, z=0.0, w=1.0):
         self.x = x
         self.y = y
         self.z = z
+        self.w = w
     
     def as_tuple(self, w_first=False):
         """Return quaternion as tuple
@@ -55,7 +55,7 @@ class Quat:
             return (self.x, self.y, self.z, self.w)
     
     def __repr__(self):
-        return f"Quat({self.w}, {self.x}, {self.y}, {self.z})"
+        return f"Quat({self.x}, {self.y}, {self.z}, {self.w})"
 
 # Read functions for signed integers
 def read_i8(f):
@@ -204,7 +204,7 @@ def read_quat_wxyz(f):
     x = read_f32(f)
     y = read_f32(f)
     z = read_f32(f)
-    return Quat(w, x, y, z)
+    return Quat(x, y, z, w)
 
 def read_quat_xyzw(f):
     """Read quaternion in X,Y,Z,W order"""
@@ -212,7 +212,7 @@ def read_quat_xyzw(f):
     y = read_f32(f)
     z = read_f32(f)
     w = read_f32(f)
-    return Quat(w, x, y, z)
+    return Quat(x, y, z, w)
 
 # Write functions (if needed for other formats)
 def write_i8(f, value):
@@ -256,3 +256,22 @@ def list_2d(width, height, default=None):
         default: Default value for each element (default: None)
     """
     return [[default for _ in range(height)] for _ in range(width)]
+
+
+def convert_rose_position_to_blender(x, y, z):
+    """
+    Convert Rose Online coordinates to Blender coordinates.
+    Matches Rust implementation: (x, y, z) -> (x, z, -y) / 100.0
+    
+    Rose Online: Y-up, Z-forward (right-handed)
+    Blender: Z-up, Y-forward (right-handed)
+    
+    Args:
+        x: Rose X coordinate
+        y: Rose Y coordinate
+        z: Rose Z coordinate
+        
+    Returns:
+        Tuple of (x, y, z) for Blender
+    """
+    return (x / 100.0, z / 100.0, -y / 100.0)

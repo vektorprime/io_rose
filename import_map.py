@@ -5,7 +5,7 @@ from .rose.zsc import Zsc
 from .rose.ifo import Ifo
 from .rose.zms import ZMS
 
-from .rose.utils import Vector2, Vector3, list_2d
+from .rose.utils import Vector2, Vector3, list_2d, convert_rose_position_to_blender
 
 import os
 from pathlib import Path
@@ -669,20 +669,18 @@ class ImportMap(bpy.types.Operator, ImportHelper):
 
                     for vy in range(him.length):
                         for vx in range(him.width):
-                            # Rose coordinate system: X=right, Y=up, Z=forward
-                            # Blender: X=right, Y=forward, Z=up
-                            # Conversion: Rose(X, Y, Z) -> Blender(X, Z, Y) with Y up
+                            # Rust coordinate transformation: (x, y, z) -> (x, z, -y) / 100.0
+                            # Rose X (vx) -> Blender X
+                            # Rose Z (vy) -> Blender Y
+                            # Rose Y (height) -> Blender Z (NEGATED)
                             
-                            # Height is Rose Y (up) -> Blender Z (up)
                             height = him.heights[vy][vx] / 100.0
                             
-                            # Rose X -> Blender X
                             world_x = (vx + offset_x) * grid_scale + world_offset_x
-                            
-                            # Rose Z (depth/forward) -> Blender Y (forward)
                             world_y = (vy + offset_y) * grid_scale + world_offset_y
                             
-                            vertices.append((world_x, world_y, height))
+                            # Apply Rust transformation: negate height for Blender Z
+                            vertices.append((world_x, world_y, -height))
                             vi = len(vertices) - 1
                             him.indices[vy][vx] = vi
                             indices[vy][vx] = vi
@@ -999,15 +997,13 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         
         # --- Transform Conversion (Rose -> Blender) ---
         # Rose: X=right, Y=up, Z=forward | Blender: X=right, Y=forward, Z=up
-        # Conversion: Rose(X, Y, Z) -> Blender(X, Z, Y)
-        # This aligns the coordinate systems with Z as up in Blender
-        
+        # Convert ROSE coordinates to Blender (X, Z, -Y) and scale by 1/100
+        # Matches Rust implementation: (x, y, z) -> (x, z, -y) / 100.0
         pos = ifo_object.position
-        parent_empty.location = (
-            (pos.x / 100.0) + 52.0,         # Rose X -> Blender X
-            (pos.y / 100.0) + 52.0,         # Rose Y -> Blender Y (flip Y/Z)
-            (pos.z / 100.0)                 # Rose Z -> Blender Z (flip Y/Z)
-        )
+        bx, by, bz = convert_rose_position_to_blender(pos.x, pos.y, pos.z)
+        # Apply world offset to match terrain coordinates (52m = 5200cm offset)
+        parent_empty.location = (bx + 52.0, bz + 52.0, by + 52.0)
+
         
         # Use rotation as specified in IFO file and apply +90° on Y axis
         import math
@@ -1057,12 +1053,9 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                 obj.data.materials.append(material_cache[material_id])
         
         # --- Local Transform (Relative to Parent) ---
-        # Flip Y/Z: Rose(X, Y, Z) -> Blender(X, Y, Z)
-        obj.location = (
-            part.position.x / 100.0,        # Rose X -> Blender X
-            part.position.y / 100.0,        # Rose Y -> Blender Y (flip Y/Z)
-            part.position.z / 100.0         # Rose Z -> Blender Z (flip Y/Z)
-        )
+        # Convert ROSE coordinates to Blender (X, Z, -Y) and scale by 1/100
+        # Note: Parts use local coordinates relative to parent, so no world offset needed
+        obj.location = convert_rose_position_to_blender(part.position.x, part.position.y, part.position.z)
         
         # Use rotation as specified in IFO file and apply -90° on Y axis
         import math

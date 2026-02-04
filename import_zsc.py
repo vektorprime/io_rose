@@ -6,6 +6,7 @@ if "bpy" in locals():
 else:
     from .rose.zsc import *
     from .rose.ifo import *
+    from .rose.utils import convert_rose_position_to_blender
     from .import_zms import ImportZMS
 
 import bpy
@@ -150,7 +151,9 @@ class ImportZSC(bpy.types.Operator, ImportHelper):
         
         # Convert ROSE coordinates to Blender (X, Z, -Y) and scale by 1/100
         pos = ifo_object.position
-        parent_empty.location = (pos.x / 100.0, pos.z / 100.0, -pos.y / 100.0)
+        bx, by, bz = convert_rose_position_to_blender(pos.x, pos.y, pos.z)
+        # Apply world offset to match terrain coordinates (52m = 5200cm offset)
+        parent_empty.location = (bx + 52.0, bz + 52.0, by + 52.0)
         
         # Convert quaternion (W, X, Y, Z) -> Blender (W, X, -Z, Y)
         rot = ifo_object.rotation
@@ -200,7 +203,8 @@ class ImportZSC(bpy.types.Operator, ImportHelper):
                 obj.data.materials.append(material_cache[material_id])
         
         # Set transform (relative to parent)
-        obj.location = (part.position.x / 100.0, part.position.z / 100.0, -part.position.y / 100.0)
+        # Note: Parts use local coordinates relative to parent, so no world offset needed
+        obj.location = convert_rose_position_to_blender(part.position.x, part.position.y, part.position.z)
         obj.rotation_mode = 'QUATERNION'
         obj.rotation_quaternion = (part.rotation.w, part.rotation.x, -part.rotation.z, part.rotation.y)
         obj.scale = (part.scale.x, part.scale.z, part.scale.y)
