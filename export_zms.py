@@ -275,8 +275,8 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
                 
                 if key not in vertex_map:
                     v = Vertex()
-                    # vec3 position
-                    v.position = Vector3(vert.co.x, vert.co.y, vert.co.z)
+                    # vec3 position - apply Blender → Rose coordinate transform (x, -z, y)
+                    v.position = Vector3(vert.co.x, -vert.co.z, vert.co.y)
                     
                     # Scale positions for version 5/6 (stored *100 in file)
                     if version <= 6:
@@ -284,9 +284,9 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
                         v.position.y *= 100.0
                         v.position.z *= 100.0
                     
-                    # vec3 normal
+                    # vec3 normal - apply Blender → Rose coordinate transform (x, -z, y)
                     if zms.normals_enabled():
-                        v.normal = Vector3(vert.normal.x, vert.normal.y, vert.normal.z)
+                        v.normal = Vector3(vert.normal.x, -vert.normal.z, vert.normal.y)
                     
                     # zz_color (4x float)
                     if zms.colors_enabled():

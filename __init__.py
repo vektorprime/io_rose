@@ -12,8 +12,11 @@ if "bpy" in locals():
     import importlib
     if "import_map" in locals():
         importlib.reload(import_map)
+    if "import_terrain" in locals():
+        importlib.reload(import_terrain)
 else:
     from .import_map import ImportMap
+    from .import_terrain import ImportTerrain
     from .import_zmd import ImportZMD
     from .import_zms import ImportZMS
     from .export_zms import ExportZMS
@@ -27,11 +30,13 @@ def menu_func_export(self, context):
 def menu(self, context):
     self.layout.separator()
     self.layout.operator(ImportMap.bl_idname, text="ROSE Map (.zon)")
+    self.layout.operator(ImportTerrain.bl_idname, text="ROSE Terrain Only (.zon)")
     self.layout.operator(ImportZMD.bl_idname, text=ImportZMD.bl_label)
     self.layout.operator(ImportZMS.bl_idname, text=ImportZMS.bl_label)
 
 def register():
     bpy.utils.register_class(ImportMap)
+    bpy.utils.register_class(ImportTerrain)
     bpy.utils.register_class(ImportZMD)
     bpy.utils.register_class(ImportZMS)
     bpy.utils.register_class(ExportZMS)
@@ -41,6 +46,7 @@ def register():
 
 def unregister():
     bpy.utils.unregister_class(ImportMap)
+    bpy.utils.unregister_class(ImportTerrain)
     bpy.utils.unregister_class(ImportZMD)
     bpy.utils.unregister_class(ImportZMS)
     bpy.utils.unregister_class(ExportZMS)

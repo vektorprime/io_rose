@@ -29,6 +29,12 @@ class ImportZSC(bpy.types.Operator, ImportHelper):
         default=True,
     )
     
+    world_offset: bpy.props.FloatProperty(
+        name="World Offset",
+        description="World offset in meters for positioning objects (default52.0m = 5200cm)",
+        default=52.0,
+    )
+    
     load_cnst_objects: BoolProperty(
         name="Load CNST Objects",
         description="Load construction objects from IFO file",
@@ -126,7 +132,7 @@ class ImportZSC(bpy.types.Operator, ImportHelper):
         Blender expects quaternions in (W, X, Y, Z) format.
 
         The correct transformation for coordinate system conversion is:
-        (W, X, Y, Z) -> (X, Z, -Y, W)
+        (W, X, Y, Z) -> (W, X, Z, -Y)
 
         This aligns with Blender's coordinate system (Y-up, forward -Y).
 
@@ -136,7 +142,7 @@ class ImportZSC(bpy.types.Operator, ImportHelper):
         Returns:
             Tuple of (w, x, y, z) for Blender
         """
-        return (rot.x, rot.z, -rot.y, rot.w)
+        return (rot.w, rot.x, rot.z, -rot.y)
     
     def spawn_object(self, context, collection, zsc, ifo_object, material_cache, mesh_cache, base_path):
         """Spawn a ZSC object instance from IFO data"""
@@ -152,13 +158,13 @@ class ImportZSC(bpy.types.Operator, ImportHelper):
         # Convert ROSE coordinates to Blender (X, Z, -Y) and scale by 1/100
         pos = ifo_object.position
         bx, by, bz = convert_rose_position_to_blender(pos.x, pos.y, pos.z)
-        # Apply world offset to match terrain coordinates (52m = 5200cm offset)
-        parent_empty.location = (bx + 52.0, bz + 52.0, by + 52.0)
+        # Apply configurable world offset to match terrain coordinates
+        parent_empty.location = (bx + self.world_offset, bz + self.world_offset, by + self.world_offset)
         
-        # Convert quaternion (W, X, Y, Z) -> Blender (W, X, -Z, Y)
+        # Convert quaternion (W, X, Y, Z) -> Blender (W, X, Z, -Y)
         rot = ifo_object.rotation
         parent_empty.rotation_mode = 'QUATERNION'
-        parent_empty.rotation_quaternion = (rot.w, rot.x, -rot.z, rot.y)
+        parent_empty.rotation_quaternion = self.convert_rose_quaternion_to_blender(rot)
         
         # Scale
         parent_empty.scale = (ifo_object.scale.x, ifo_object.scale.z, ifo_object.scale.y)
@@ -206,7 +212,7 @@ class ImportZSC(bpy.types.Operator, ImportHelper):
         # Note: Parts use local coordinates relative to parent, so no world offset needed
         obj.location = convert_rose_position_to_blender(part.position.x, part.position.y, part.position.z)
         obj.rotation_mode = 'QUATERNION'
-        obj.rotation_quaternion = (part.rotation.w, part.rotation.x, -part.rotation.z, part.rotation.y)
+        obj.rotation_quaternion = self.convert_rose_quaternion_to_blender(part.rotation)
         obj.scale = (part.scale.x, part.scale.z, part.scale.y)
         
         return obj
@@ -245,8 +251,8 @@ class ImportZSC(bpy.types.Operator, ImportHelper):
             mesh_name = Path(mesh_path).stem
             mesh = bpy.data.meshes.new(mesh_name)
             
-            # Vertices
-            verts = [(v.position.x, v.position.y, v.position.z) for v in zms.vertices]
+            # Vertices - apply Rose → Blender coordinate transform (x, z, -y)
+            verts = [(v.position.x, v.position.z, -v.position.y) for v in zms.vertices]
             
             # Faces
             faces = [(int(i.x), int(i.y), int(i.z)) for i in zms.indices]

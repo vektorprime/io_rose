@@ -27,9 +27,16 @@ class ZMD:
                 self.read(f)
 
     def read(self, f):
-        # Read 7-character format identifier
+        # Read 7-character format identifier (e.g., "ZMD0002", "ZMD0003")
         identifier = read_fstr(f, 7)
         print(f"ZMD Identifier: {identifier}")
+        
+        # Extract version from identifier (last digit(s))
+        # ZMD0002 = version 2, ZMD0003 = version 3
+        try:
+            self.version = int(identifier[-1:])
+        except ValueError:
+            self.version = 2  # Default to version 2 if parsing fails
         
         # Read bone data
         bone_count = read_u32(f)
@@ -45,8 +52,10 @@ class ZMD:
             # Apply scaling to convert from cm to m
             bone.position = bone.position.scalar(0.01)
             
-            # Force first bone to be root
-            if i == 0:
+            # Handle root bone identification per Rust reference:
+            # Root bones are identified by parent == bone_index (self-reference)
+            # Convert self-reference to -1 for consistency
+            if bone.parent_id == i:
                 bone.parent_id = -1
 
             print(f"Bone {i}: {bone.name} (parent: {bone.parent_id})")
@@ -69,7 +78,13 @@ class ZMD:
                     dummy.name = read_str(f)
                     dummy.parent_id = read_i32(f)
                     dummy.position = read_vector3_f32(f)
-                    dummy.rotation = read_quat_wxyz(f)
+                    
+                    # ZMD version 3+ has rotation data for dummies
+                    # ZMD version 2 has NO rotation data - use identity quaternion
+                    if self.version >= 3:
+                        dummy.rotation = read_quat_wxyz(f)
+                    else:
+                        dummy.rotation = Quat(0.0, 0.0, 0.0, 1.0)  # Identity
                     
                     # Apply scaling
                     dummy.position = dummy.position.scalar(0.01)

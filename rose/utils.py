@@ -93,31 +93,55 @@ def read_bool(f):
     """Read boolean (1 byte, 0=False, non-zero=True)"""
     return struct.unpack("<?", f.read(1))[0]
 
+# Helper function for decoding strings with EUC-KR fallback
+def decode_string_with_fallback(data):
+    """Decode bytes to string with UTF-8 and EUC-KR fallback.
+    
+    This matches the Rust reference implementation which tries UTF-8 first,
+    then falls back to EUC-KR for Korean text support.
+    
+    Args:
+        data: Bytes to decode
+        
+    Returns:
+        Decoded string
+    """
+    if not data:
+        return ""
+    try:
+        return data.decode('utf-8')
+    except UnicodeDecodeError:
+        try:
+            return data.decode('euc-kr', errors='ignore')
+        except (UnicodeDecodeError, LookupError):
+            # Fallback to latin-1 if EUC-KR is not available
+            return data.decode('latin-1', errors='ignore')
+
 # Read functions for strings
 def read_str(f):
-    """Read null-terminated string"""
+    """Read null-terminated string with EUC-KR fallback for Korean text"""
     chars = []
     while True:
         c = f.read(1)
         if not c or c == b'\x00':
             break
         chars.append(c)
-    return b''.join(chars).decode('latin-1', errors='ignore')
+    return decode_string_with_fallback(b''.join(chars))
 
 def read_fstr(f, length):
-    """Read a fixed-length string of specified length"""
+    """Read a fixed-length string of specified length with EUC-KR fallback"""
     data = f.read(length)
-    return data.decode('latin-1', errors='ignore').rstrip('\x00')
+    return decode_string_with_fallback(data).rstrip('\x00')
 
 def read_bstr(f):
-    """Read BSTR (length-prefixed string)
+    """Read BSTR (length-prefixed string) with EUC-KR fallback
     Format: BYTE length, followed by that many characters
     """
     length = read_u8(f)
     if length == 0:
         return ""
     data = f.read(length)
-    return data.decode('latin-1', errors='ignore')
+    return decode_string_with_fallback(data)
 
 # Read functions for lists
 def read_list_i16(f, count):

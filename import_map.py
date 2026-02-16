@@ -37,9 +37,15 @@ class ImportMap(bpy.types.Operator, ImportHelper):
     )
     
     load_deco_objects: BoolProperty(
-        name="Load DECO Objects", 
+        name="Load DECO Objects",
         description="Load decoration objects from IFO files",
         default=True,
+    )
+    
+    verbose_logging: BoolProperty(
+        name="Verbose Logging",
+        description="Log warnings for skipped files and errors during import",
+        default=False,
     )
     
     limit_tiles: BoolProperty(
@@ -55,9 +61,21 @@ class ImportMap(bpy.types.Operator, ImportHelper):
     )
     
     tile_y: bpy.props.IntProperty(
-        name="Tile Y", 
+        name="Tile Y",
         description="Y coordinate of tile to load (if Limit Tiles enabled)",
         default=30,
+    )
+    
+    world_offset_x: bpy.props.FloatProperty(
+        name="World Offset X",
+        description="World offset in meters for X axis (default52.0m = 5200cm)",
+        default=52.0,
+    )
+    
+    world_offset_y: bpy.props.FloatProperty(
+        name="World Offset Y",
+        description="World offset in meters for Y axis (default52.0m = 5200cm)",
+        default=52.0,
     )
 
     texture_extensions = [".DDS", ".dds", ".PNG", ".png"]
@@ -514,7 +532,8 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                         zsc_cnst = Zsc(str(candidate))
                         break
                     except Exception as e:
-                        pass
+                        if self.verbose_logging:
+                            self.report({'WARNING'}, f"Failed to load CNST ZSC {candidate}: {str(e)}")
             t = record_time("Load ZSC files", t)
             
             # --- Load DECO ZSC (Decoration Objects) ---
@@ -543,7 +562,8 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                         deco_zsc = Zsc(str(candidate))
                         zsc_deco_list.append(deco_zsc)
                     except Exception as e:
-                        pass
+                        if self.verbose_logging:
+                            self.report({'WARNING'}, f"Failed to load DECO ZSC {candidate}: {str(e)}")
             
             wm.progress_update(10)
             
@@ -563,10 +583,9 @@ class ImportMap(bpy.types.Operator, ImportHelper):
             # CRITICAL: Calculate grid scale and world offset to match object coordinates
             # Rust reference: positions are divided by 100 (cm to m) then offset by 5200cm = 52m
             grid_scale = zon.grid_size / 100.0  # Convert grid_size (cm) to meters
-            # For a full 64x64 zone, center is at 32*block_size. Block size = 16 grids * grid_size * grid_per_patch?
-            # Hardcoded 52.0 matches the object spawning code
-            world_offset_x = 52.0  # 5200cm = 52m
-            world_offset_y = 52.0  # 5200cm = 52m
+            # Use configurable world offset (default52.0m = 5200cm for standard maps)
+            world_offset_x = self.world_offset_x
+            world_offset_y = self.world_offset_y
 
             tiles = SimpleNamespace()
             tiles.min_pos = Vector2(999, 999)
@@ -627,14 +646,16 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                         try:
                             ifo = Ifo(ifo_file)
                         except Exception as e:
-                            pass
+                            if self.verbose_logging:
+                                self.report({'WARNING'}, f"Failed to load IFO {ifo_file}: {str(e)}")
 
                     tiles.indices[norm_y][norm_x] = list_2d(him.width, him.length)
                     tiles.hims[norm_y][norm_x] = him
                     tiles.tils[norm_y][norm_x] = til
                     tiles.ifos[norm_y][norm_x] = ifo
                 except Exception as e:
-                    pass
+                    if self.verbose_logging:
+                        self.report({'WARNING'}, f"Failed to load tile {tile_name}: {str(e)}")
 
             # Calculate tile offsets (in grid units, will be multiplied by grid_scale later)
             length, cur_length = 0, 0
@@ -1001,16 +1022,16 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         # Matches Rust implementation: (x, y, z) -> (x, z, -y) / 100.0
         pos = ifo_object.position
         bx, by, bz = convert_rose_position_to_blender(pos.x, pos.y, pos.z)
-        # Apply world offset to match terrain coordinates (52m = 5200cm offset)
-        parent_empty.location = (bx + 52.0, bz + 52.0, by + 52.0)
+        # Apply configurable world offset to match terrain coordinates
+        parent_empty.location = (bx + self.world_offset_x, bz + self.world_offset_y, by + self.world_offset_x)
 
         
-        # Use rotation as specified in IFO file and apply +90° on Y axis
-        import math
+        # Convert rotation from IFO (XYZW order) to Blender (WXYZ order)
+        # Apply coordinate transform: (x, y, z, w) -> (w, x, z, -y)
+        # Per Rust reference: Quat::from_xyzw(rotation.x, rotation.z, -rotation.y, rotation.w)
         from mathutils import Quaternion
         rot = ifo_object.rotation
-        # Use corrected quaternion (W=-0.5, X=-0.5, Y=0.5, Z=0.5)
-        parent_empty.rotation_quaternion = Quaternion((-0.5, -0.5, 0.5, 0.5))
+        parent_empty.rotation_quaternion = Quaternion((rot.w, rot.x, rot.z, -rot.y))
         
         # Scale: (x, y, z) - keep Y/Z order (no swap needed now)
         parent_empty.scale = (ifo_object.scale.x, ifo_object.scale.y, ifo_object.scale.z)
@@ -1057,12 +1078,13 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         # Note: Parts use local coordinates relative to parent, so no world offset needed
         obj.location = convert_rose_position_to_blender(part.position.x, part.position.y, part.position.z)
         
-        # Use rotation as specified in IFO file and apply -90° on Y axis
-        import math
+        # Convert rotation from ZSC part (WXYZ in file, stored as XYZW in Vec4) to Blender
+        # Apply coordinate transform: (x, y, z, w) -> (w, x, z, -y)
+        # Per Rust reference: Quat::from_xyzw(rotation.x, rotation.z, -rotation.y, rotation.w)
         from mathutils import Quaternion
+        rot = part.rotation
         obj.rotation_mode = 'QUATERNION'
-        # Use corrected quaternion (W=-0.5, X=-0.5, Y=0.5, Z=0.5)
-        obj.rotation_quaternion = Quaternion((-0.5, -0.5, 0.5, 0.5))
+        obj.rotation_quaternion = Quaternion((rot.w, rot.x, rot.z, -rot.y))
         
         # Scale: (x, y, z) - keep Y/Z order (no swap needed now)
         obj.scale = (
@@ -1084,10 +1106,11 @@ class ImportMap(bpy.types.Operator, ImportHelper):
             mesh_name = Path(mesh_path).stem
             mesh = bpy.data.meshes.new(mesh_name)
             
-            # Coordinate conversion: Rose(X, Y, Z) -> Blender(X, Z, Y)
+            # Coordinate conversion: Rose(X, Y, Z) -> Blender(X, Z, -Y)
             # Rose: X=right, Y=up, Z=forward (towards camera)
             # Blender: X=right, Y=forward, Z=up
-            verts = [(v.position.x, v.position.z, v.position.y) for v in zms.vertices]
+            # Per Rust reference: (x, y, z) -> (x, z, -y)
+            verts = [(v.position.x, v.position.z, -v.position.y) for v in zms.vertices]
             faces = [(int(i.x), int(i.y), int(i.z)) for i in zms.indices]
             
             mesh.from_pydata(verts, [], faces)

@@ -118,6 +118,13 @@ class ZMS:
             bone_table.append(read_u32(f))  # uint32 bone index
 
         vert_count = read_u32(f)  # uint32 in v5/6 (but stored as uint16 in C++)
+        
+        # Validate vertex count to prevent potential overflow/corruption issues
+        if vert_count > 65535:
+            self.report('WARNING', f"Vertex count {vert_count} exceeds uint16 max (65535). File may be corrupted.")
+        if vert_count > 1000000:
+            raise ValueError(f"Vertex count {vert_count} is unreasonably large. File is likely corrupted.")
+        
         for i in range(vert_count):
             self.vertices.append(Vertex())
 
@@ -214,6 +221,11 @@ class ZMS:
             self.bones.append(read_u16(f))  # uint16 bone_indices[i]
 
         vert_count = read_u16(f)  # uint16 (matches C++ num_verts)
+        
+        # Validate vertex count (uint16 max is 65535, but we warn at high values)
+        if vert_count > 50000:
+            self.report('WARNING', f"High vertex count {vert_count}. File may be slow to process.")
+        
         for i in range(vert_count):
             self.vertices.append(Vertex())
 

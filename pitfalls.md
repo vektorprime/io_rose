@@ -1,0 +1,88 @@
+# Pitfalls & Lessons Learned
+
+## Coordinate System Transformation
+
+**Issue**: Rose Online uses (X=right, Y=up, Z=forward) while Blender uses (X=right, Y=forward, Z=up).
+
+**Solution**: Transform coordinates using `(x, z, -y)`:
+- [`import_map.py:1090`](import_map.py:1090) - Map object positions
+- [`import_map.py:1013`](import_map.py:1013) - IFO rotations
+- [`import_map.py:1065`](import_map.py:1065) - Part rotations
+- [`import_zms.py`](import_zms.py) - ZMS mesh vertices
+- [`export_zms.py`](export_zms.py) - Export must apply inverse transform `(x, -z, y)` for round-trip fidelity
+
+## Quaternion Order Differences
+
+**Issue**: Different file formats use different quaternion component orders.
+
+| Format | Order | Notes |
+|--------|-------|-------|
+| ZMD/ZMO/ZSC | WXYZ | w component first |
+| IFO | XYZW | x component first |
+| Blender | WXYZ | Internal representation |
+
+**Solution**: Convert IFO quaternions (XYZW) to Blender format (WXYZ) using `(w, x, z, -y)`:
+- The `-y` accounts for coordinate system handedness change
+- [`import_map.py:1013`](import_map.py:1013), [`import_map.py:1065`](import_map.py:1065)
+
+## Version-Dependent Parsing
+
+**Issue**: ZMD v2 vs v3 have different dummy bone structures.
+
+**Bug**: [`rose/zmd.py:72`](rose/zmd.py:72) attempted to read rotation field for v2 files which don't have it.
+
+**Solution**: Always check version before reading optional fields:
+```python
+if version >= 3:
+    rotation = read_quaternion()
+```
+
+## Root Bone Parent Handling
+
+**Issue**: ZMD files may have root bones with parent set to own index (self-referencing).
+
+**Bug**: [`rose/zmd.py:49`](rose/zmd.py:49) forced ALL root bones to have no parent.
+
+**Solution**: Only convert self-referencing bones (where `parent_idx == bone_idx`) to no parent:
+```python
+if parent_idx != bone_idx:
+    bone.parent = bones[parent_idx]
+```
+
+## Encoding Handling
+
+**Issue**: Rose Online files may use UTF-8 or EUC-KR encoding (Korean text).
+
+**Solution**: Try UTF-8 first, fallback to EUC-KR:
+```python
+try:
+    data = content.decode('utf-8')
+except UnicodeDecodeError:
+    data = content.decode('euc-kr')
+```
+- [`rose/utils.py`](rose/utils.py) - `safe_decode()` function
+
+## Hardcoded Values
+
+**Issue**: Hardcoded values reduce flexibility and can hide bugs.
+
+**Bugs Fixed**:
+- [`import_map.py:1013`](import_map.py:1013) - Hardcoded quaternion replaced with actual IFO rotation
+- [`import_map.py:1065`](import_map.py:1065) - Hardcoded quaternion replaced with actual part rotation
+- World offset was hardcoded 52.0 - now configurable
+
+**Solution**: Always use actual data from parsed files; make constants configurable when they might vary.
+
+## Round-Trip Fidelity
+
+**Issue**: Export must apply inverse transforms of import for correct round-trip.
+
+**Solution**: If import uses `(x, z, -y)`, export must use `(x, -z, y)`:
+- [`export_zms.py`](export_zms.py) - Apply inverse coordinate and normal transforms
+
+## Silent Exceptions
+
+**Issue**: Try/except blocks that silently pass can hide parsing errors.
+
+**Solution**: Use verbose logging option to report silent exceptions during debugging:
+- [`import_map.py`](import_map.py) - Added verbose logging for parsing issues
