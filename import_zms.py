@@ -111,15 +111,16 @@ class ImportZMS(bpy.types.Operator, ImportHelper):
         #-- Vertices (vec3 positions)
         verts = []
         for v in zms.vertices:
-            # Convert Rose Online coordinates to Blender: (x, y, z) -> (x, z, -y)
-            verts.append((v.position.x, v.position.z, -v.position.y))
+            # Convert Rose Online coordinates to Blender: (x, y, z) -> (x, -y, z)
+            # Both Rose and Blender use Z-up, only Y direction needs negation
+            verts.append((v.position.x, -v.position.y, v.position.z))
 
         #-- Normals (transformed to match coordinate system)
         normals = []
         if zms.normals_enabled():
             for v in zms.vertices:
-                # Convert normal coordinates: (nx, ny, nz) -> (nx, nz, -ny)
-                normals.append((v.normal.x, v.normal.z, -v.normal.y))
+                # Convert normal coordinates: (nx, ny, nz) -> (nx, -ny, nz)
+                normals.append((v.normal.x, -v.normal.y, v.normal.z))
         else:
             # If no normals in file, let Blender compute them
             normals = None

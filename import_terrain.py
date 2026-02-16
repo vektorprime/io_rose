@@ -340,7 +340,8 @@ class ImportTerrain(bpy.types.Operator, ImportHelper):
                             world_x = (vx + offset_x) * grid_scale + world_offset_x
                             world_y = (vy + offset_y) * grid_scale + world_offset_y
                             
-                            vertices.append((world_x, world_y, -height))
+                            # Both Rose and Blender use Z-up, negate Y for forward direction
+                            vertices.append((world_x, -world_y, height))
                             vi = len(vertices) - 1
                             him.indices[vy][vx] = vi
                             indices[vy][vx] = vi

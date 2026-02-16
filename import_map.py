@@ -690,18 +690,17 @@ class ImportMap(bpy.types.Operator, ImportHelper):
 
                     for vy in range(him.length):
                         for vx in range(him.width):
-                            # Rust coordinate transformation: (x, y, z) -> (x, z, -y) / 100.0
-                            # Rose X (vx) -> Blender X
-                            # Rose Z (vy) -> Blender Y
-                            # Rose Y (height) -> Blender Z (NEGATED)
+                            # Both Rose and Blender use Z-up coordinate systems
+                            # Only negate Y for forward direction difference
+                            # Transform: (x, y, z) -> (x, -y, z)
                             
                             height = him.heights[vy][vx] / 100.0
                             
                             world_x = (vx + offset_x) * grid_scale + world_offset_x
                             world_y = (vy + offset_y) * grid_scale + world_offset_y
                             
-                            # Apply Rust transformation: negate height for Blender Z
-                            vertices.append((world_x, world_y, -height))
+                            # Apply Blender Z-up transform: negate Y, keep Z positive
+                            vertices.append((world_x, -world_y, height))
                             vi = len(vertices) - 1
                             him.indices[vy][vx] = vi
                             indices[vy][vx] = vi
@@ -1017,23 +1016,21 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         collection.objects.link(parent_empty)
         
         # --- Transform Conversion (Rose -> Blender) ---
-        # Rose: X=right, Y=up, Z=forward | Blender: X=right, Y=forward, Z=up
-        # Convert ROSE coordinates to Blender (X, Z, -Y) and scale by 1/100
-        # Matches Rust implementation: (x, y, z) -> (x, z, -y) / 100.0
+        # Both Rose and Blender use Z-up coordinate systems
+        # Convert ROSE coordinates to Blender (X, -Y, Z) and scale by 1/100
         pos = ifo_object.position
         bx, by, bz = convert_rose_position_to_blender(pos.x, pos.y, pos.z)
-        # Apply configurable world offset to match terrain coordinates
-        parent_empty.location = (bx + self.world_offset_x, bz + self.world_offset_y, by + self.world_offset_x)
+        # Apply configurable world offset to match terrain coordinates (only horizontal X, Y)
+        parent_empty.location = (bx + self.world_offset_x, by + self.world_offset_y, bz)
 
         
         # Convert rotation from IFO (XYZW order) to Blender (WXYZ order)
-        # Apply coordinate transform: (x, y, z, w) -> (w, x, z, -y)
-        # Per Rust reference: Quat::from_xyzw(rotation.x, rotation.z, -rotation.y, rotation.w)
+        # Both Z-up, only negate Y component: (w, x, y, z) -> (w, x, -y, z)
         from mathutils import Quaternion
         rot = ifo_object.rotation
-        parent_empty.rotation_quaternion = Quaternion((rot.w, rot.x, rot.z, -rot.y))
+        parent_empty.rotation_quaternion = Quaternion((rot.w, rot.x, -rot.y, rot.z))
         
-        # Scale: (x, y, z) - keep Y/Z order (no swap needed now)
+        # Scale: no axis swap needed since both use Z-up
         parent_empty.scale = (ifo_object.scale.x, ifo_object.scale.y, ifo_object.scale.z)
         
         # Spawn all component parts (meshes) of this object
@@ -1074,19 +1071,19 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                 obj.data.materials.append(material_cache[material_id])
         
         # --- Local Transform (Relative to Parent) ---
-        # Convert ROSE coordinates to Blender (X, Z, -Y) and scale by 1/100
+        # Both Rose and Blender use Z-up coordinate systems
+        # Convert ROSE coordinates to Blender (X, -Y, Z) and scale by 1/100
         # Note: Parts use local coordinates relative to parent, so no world offset needed
         obj.location = convert_rose_position_to_blender(part.position.x, part.position.y, part.position.z)
         
         # Convert rotation from ZSC part (WXYZ in file, stored as XYZW in Vec4) to Blender
-        # Apply coordinate transform: (x, y, z, w) -> (w, x, z, -y)
-        # Per Rust reference: Quat::from_xyzw(rotation.x, rotation.z, -rotation.y, rotation.w)
+        # Both Z-up, only negate Y component: (w, x, y, z) -> (w, x, -y, z)
         from mathutils import Quaternion
         rot = part.rotation
         obj.rotation_mode = 'QUATERNION'
-        obj.rotation_quaternion = Quaternion((rot.w, rot.x, rot.z, -rot.y))
+        obj.rotation_quaternion = Quaternion((rot.w, rot.x, -rot.y, rot.z))
         
-        # Scale: (x, y, z) - keep Y/Z order (no swap needed now)
+        # Scale: no axis swap needed since both use Z-up
         obj.scale = (
             part.scale.x,
             part.scale.y,
@@ -1106,11 +1103,10 @@ class ImportMap(bpy.types.Operator, ImportHelper):
             mesh_name = Path(mesh_path).stem
             mesh = bpy.data.meshes.new(mesh_name)
             
-            # Coordinate conversion: Rose(X, Y, Z) -> Blender(X, Z, -Y)
-            # Rose: X=right, Y=up, Z=forward (towards camera)
-            # Blender: X=right, Y=forward, Z=up
-            # Per Rust reference: (x, y, z) -> (x, z, -y)
-            verts = [(v.position.x, v.position.z, -v.position.y) for v in zms.vertices]
+            # Coordinate conversion: Both Rose and Blender use Z-up
+            # Only negate Y for forward direction difference
+            # Transform: (x, y, z) -> (x, -y, z)
+            verts = [(v.position.x, -v.position.y, v.position.z) for v in zms.vertices]
             faces = [(int(i.x), int(i.y), int(i.z)) for i in zms.indices]
             
             mesh.from_pydata(verts, [], faces)

@@ -285,10 +285,15 @@ def list_2d(width, height, default=None):
 def convert_rose_position_to_blender(x, y, z):
     """
     Convert Rose Online coordinates to Blender coordinates.
-    Matches Rust implementation: (x, y, z) -> (x, z, -y) / 100.0
     
-    Rose Online: Y-up, Z-forward (right-handed)
-    Blender: Z-up, Y-forward (right-handed)
+    Both Rose Online and Blender use Z-up coordinate systems.
+    Only the Y axis direction needs to be negated to account for
+    the forward direction difference.
+    
+    Rose Online: X=right, Y=forward, Z=up (right-handed, Z-up)
+    Blender: X=right, Y=forward, Z=up (right-handed, Z-up)
+    
+    Transform: (x, y, z) -> (x, -y, z) / 100.0
     
     Args:
         x: Rose X coordinate
@@ -298,4 +303,4 @@ def convert_rose_position_to_blender(x, y, z):
     Returns:
         Tuple of (x, y, z) for Blender
     """
-    return (x / 100.0, z / 100.0, -y / 100.0)
+    return (x / 100.0, -y / 100.0, z / 100.0)

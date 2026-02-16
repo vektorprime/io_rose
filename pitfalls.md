@@ -1,15 +1,38 @@
 # Pitfalls & Lessons Learned
 
+## Reference Implementation Coordinate System Differences
+
+**Critical Lesson**: Reference implementations may use different coordinate systems than your target engine.
+
+The Rust Bevy 0.11 reference implementation uses:
+- **Bevy**: Y-up coordinate system
+- **Transform**: `(x, z, -y)` swaps Y and Z for Bevy's Y-up system
+
+Blender uses:
+- **Blender**: Z-up coordinate system (same as Rose Online)
+- **Transform**: `(x, -y, z)` only negates Y for forward direction
+
+**Warning**: Do NOT blindly copy transforms from reference implementations without verifying their coordinate system matches your target engine.
+
 ## Coordinate System Transformation
 
-**Issue**: Rose Online uses (X=right, Y=up, Z=forward) while Blender uses (X=right, Y=forward, Z=up).
+**Issue**: Rose Online uses Z-up (X=right, Y=forward, Z=up). Blender also uses Z-up, so minimal transformation is needed.
 
-**Solution**: Transform coordinates using `(x, z, -y)`:
+**Solution**: Since both Rose Online and Blender use Z-up coordinates, only negate Y for forward direction:
+
+| Transform | Formula |
+|-----------|---------|
+| Position | `(x/100, -y/100, z/100)` |
+| Rotation | `(w, x, -y, z)` |
+| Scale | `(sx, sy, sz)` |
+| Normal | `(nx, -ny, nz)` |
+
+Implementation locations:
 - [`import_map.py:1090`](import_map.py:1090) - Map object positions
 - [`import_map.py:1013`](import_map.py:1013) - IFO rotations
 - [`import_map.py:1065`](import_map.py:1065) - Part rotations
 - [`import_zms.py`](import_zms.py) - ZMS mesh vertices
-- [`export_zms.py`](export_zms.py) - Export must apply inverse transform `(x, -z, y)` for round-trip fidelity
+- [`export_zms.py`](export_zms.py) - Export must apply inverse transform for round-trip fidelity
 
 ## Quaternion Order Differences
 
