@@ -109,3 +109,12 @@ except UnicodeDecodeError:
 
 **Solution**: Use verbose logging option to report silent exceptions during debugging:
 - [`import_map.py`](import_map.py) - Added verbose logging for parsing issues
+
+## Terrain 180° Z Rotation
+
+**Issue**: Terrain meshes require a 180° rotation on the Z axis to orient correctly.
+
+**Root Cause**: The Rust Bevy reference implementation inverts block Y coordinates using `(65.0 - block_y)` before calculating offsets (zone_loader.rs:808-809), then applies `-offset_y` to the Z position. This double-inversion achieves correct orientation in Bevy's Y-up system. For Blender's Z-up system, the equivalent fix is a 180° Z rotation.
+
+**Solution**: Apply `rotation_euler = (0, 0, math.pi)` to the terrain object after creation:
+- [`import_terrain.py:520`](import_terrain.py:520) - Terrain object rotation

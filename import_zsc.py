@@ -249,8 +249,9 @@ class ImportZSC(bpy.types.Operator, ImportHelper):
             mesh_name = Path(mesh_path).stem
             mesh = bpy.data.meshes.new(mesh_name)
             
-            # Vertices - apply Rose → Blender coordinate transform (x, -y, z)
-            verts = [(v.position.x, -v.position.y, v.position.z) for v in zms.vertices]
+            # Mesh vertices are in local object space - use as-is from file
+            # Coordinate transform is applied via object transform, not vertex positions
+            verts = [(v.position.x, v.position.y, v.position.z) for v in zms.vertices]
             
             # Faces
             faces = [(int(i.x), int(i.y), int(i.z)) for i in zms.indices]

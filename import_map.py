@@ -1103,10 +1103,9 @@ class ImportMap(bpy.types.Operator, ImportHelper):
             mesh_name = Path(mesh_path).stem
             mesh = bpy.data.meshes.new(mesh_name)
             
-            # Coordinate conversion: Both Rose and Blender use Z-up
-            # Only negate Y for forward direction difference
-            # Transform: (x, y, z) -> (x, -y, z)
-            verts = [(v.position.x, -v.position.y, v.position.z) for v in zms.vertices]
+            # Mesh vertices are in local object space - use as-is from file
+            # Coordinate transform is applied via object transform, not vertex positions
+            verts = [(v.position.x, v.position.y, v.position.z) for v in zms.vertices]
             faces = [(int(i.x), int(i.y), int(i.z)) for i in zms.indices]
             
             mesh.from_pydata(verts, [], faces)

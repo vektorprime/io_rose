@@ -109,18 +109,17 @@ class ImportZMS(bpy.types.Operator, ImportHelper):
         mesh = bpy.data.meshes.new(filename)
 
         #-- Vertices (vec3 positions)
+        # Mesh vertices are in local object space - use as-is from file
+        # Coordinate transform is applied via object transform, not vertex positions
         verts = []
         for v in zms.vertices:
-            # Convert Rose Online coordinates to Blender: (x, y, z) -> (x, -y, z)
-            # Both Rose and Blender use Z-up, only Y direction needs negation
-            verts.append((v.position.x, -v.position.y, v.position.z))
+            verts.append((v.position.x, v.position.y, v.position.z))
 
-        #-- Normals (transformed to match coordinate system)
+        #-- Normals (in local space, use as-is)
         normals = []
         if zms.normals_enabled():
             for v in zms.vertices:
-                # Convert normal coordinates: (nx, ny, nz) -> (nx, -ny, nz)
-                normals.append((v.normal.x, -v.normal.y, v.normal.z))
+                normals.append((v.normal.x, v.normal.y, v.normal.z))
         else:
             # If no normals in file, let Blender compute them
             normals = None
@@ -134,8 +133,14 @@ class ImportZMS(bpy.types.Operator, ImportHelper):
         mesh.from_pydata(verts, [], faces)
         
         #-- Set normals if available
+        # normals_split_custom_set expects one normal per loop (face-vertex), not per vertex
+        # We need to map vertex normals to loop normals
         if normals is not None:
-            mesh.normals_split_custom_set(normals)
+            loop_normals = []
+            for loop in mesh.loops:
+                vi = loop.vertex_index
+                loop_normals.append(normals[vi])
+            mesh.normals_split_custom_set(loop_normals)
 
         #-- UV (vec2 coordinates, up to 4 channels)
         if zms.uv1_enabled():
