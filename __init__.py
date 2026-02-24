@@ -2,7 +2,7 @@ bl_info = {
     "name": "ROSE Online blender plugin",
     "author": "Ralph Minderhoud and Ryko",
     "blender": (2, 77, 0),
-    "version": (0, 0, 5),
+    "version": (0, 0, 6),
     "location": "File > Import",
     "description": "Import files from ROSE Online",
     "category": "Import-Export",
@@ -22,6 +22,7 @@ else:
     from .export_zms import ExportZMS
     from .import_zsc import ImportZSC
     from .import_zmo import ImportZMO
+    from .import_zms_zmd import ImportZMSwithZMD
 
 import bpy
 
@@ -34,6 +35,7 @@ def menu(self, context):
     self.layout.operator(ImportTerrain.bl_idname, text="ROSE Terrain Only (.zon)")
     self.layout.operator(ImportZMD.bl_idname, text=ImportZMD.bl_label)
     self.layout.operator(ImportZMS.bl_idname, text=ImportZMS.bl_label)
+    self.layout.operator(ImportZMSwithZMD.bl_idname, text=ImportZMSwithZMD.bl_label)
     self.layout.operator(ImportZMO.bl_idname, text=ImportZMO.bl_label)
 
 def register():
@@ -43,6 +45,7 @@ def register():
     bpy.utils.register_class(ImportZMS)
     bpy.utils.register_class(ExportZMS)
     bpy.utils.register_class(ImportZMO)
+    bpy.utils.register_class(ImportZMSwithZMD)
     bpy.types.TOPBAR_MT_file_import.append(menu)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
     bpy.utils.register_class(ImportZSC)
@@ -54,6 +57,7 @@ def unregister():
     bpy.utils.unregister_class(ImportZMS)
     bpy.utils.unregister_class(ExportZMS)
     bpy.utils.unregister_class(ImportZMO)
+    bpy.utils.unregister_class(ImportZMSwithZMD)
     bpy.types.TOPBAR_MT_file_import.remove(menu)
     bpy.utils.unregister_class(ImportZSC)
 

@@ -3,6 +3,11 @@ Blender operator for importing ROSE Online ZMO animation files.
 
 ZMO files contain skeletal animation data that can be applied to armatures
 imported from ZMD files.
+
+Coordinate System Notes:
+- ROSE Online: X=right, Y=forward, Z=up (right-handed, Z-up)
+- Blender: X=right, Y=forward, Z=up (right-handed, Z-up)
+- Since both use the same coordinate system, we only need to scale positions (cm -> m)
 """
 
 from pathlib import Path
@@ -28,7 +33,7 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
     
     target_armature: StringProperty(
         name="Target Armature",
-        description="Name of the armature object to apply animation to (leave empty to create new)",
+        description="Name of the armature object to apply animation to (leave empty to auto-detect)",
         default="",
     )
     
@@ -38,12 +43,6 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
         default=0.01,
         min=0.0001,
         max=100.0,
-    )
-    
-    convert_coordinates: BoolProperty(
-        name="Convert Coordinates",
-        description="Convert from ROSE coordinate system to Blender coordinate system",
-        default=True,
     )
     
     start_frame: IntProperty(
@@ -172,23 +171,14 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
             fcurves.append(fcurve)
         
         # Add keyframes
+        # ROSE and Blender both use Z-up right-handed coordinates
+        # Just scale the position values (cm -> m)
         for frame_idx, pos in enumerate(channel.values):
             frame = self.start_frame + frame_idx
             
-            # Convert position based on settings
-            x, y, z = pos.x, pos.y, pos.z
-            
-            if self.convert_coordinates:
-                # ROSE: X=right, Y=forward, Z=up (right-handed, Z-up)
-                # Blender: X=right, Y=forward, Z=up (right-handed, Z-up)
-                # Transform: (x, y, z) -> (x, -y, z) * scale
-                x = x * self.scale_factor
-                y = -y * self.scale_factor
-                z = z * self.scale_factor
-            else:
-                x *= self.scale_factor
-                y *= self.scale_factor
-                z *= self.scale_factor
+            x = pos.x * self.scale_factor
+            y = pos.y * self.scale_factor
+            z = pos.z * self.scale_factor
             
             fcurves[0].keyframe_points.insert(frame, x)
             fcurves[1].keyframe_points.insert(frame, y)
@@ -207,30 +197,25 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
             fcurves.append(fcurve)
         
         # Add keyframes
+        # ROSE and Blender both use Z-up right-handed coordinates
+        # ZMO stores quaternions as W, X, Y, Z (read via read_quat_wxyz)
+        # Blender uses W, X, Y, Z order too
         for frame_idx, quat in enumerate(channel.values):
             frame = self.start_frame + frame_idx
             
-            # Quaternion conversion
-            # ZMO stores quaternions as W, X, Y, Z
-            # Blender uses W, X, Y, Z but we need to convert the coordinate system
-            w, x, y, z = quat.w, quat.x, quat.y, quat.z
+            # Quaternion is already in correct order (W, X, Y, Z)
+            w = quat.w
+            x = quat.x
+            y = quat.y
+            z = quat.z
             
-            if self.convert_coordinates:
-                # Convert quaternion from ROSE to Blender coordinate system
-                # ROSE: X=right, Y=forward, Z=up
-                # Blender: X=right, Y=forward, Z=up
-                # Transform: (x, y, z, w) -> (x, z, -y, w)
-                # This is equivalent to rotating 90 degrees around X axis
-                new_x = x
-                new_y = z
-                new_z = -y
-                new_w = w
-                
-                # Create quaternion and normalize
-                blender_quat = mathutils.Quaternion((new_w, new_x, new_y, new_z))
-                blender_quat.normalize()
-                
-                w, x, y, z = blender_quat.w, blender_quat.x, blender_quat.y, blender_quat.z
+            # Normalize quaternion
+            quat_len = (w*w + x*x + y*y + z*z) ** 0.5
+            if quat_len > 0:
+                w /= quat_len
+                x /= quat_len
+                y /= quat_len
+                z /= quat_len
             
             # Blender quaternion order is W, X, Y, Z
             fcurves[0].keyframe_points.insert(frame, w)
@@ -259,59 +244,17 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
             fcurves[2].keyframe_points.insert(frame, scale)
 
 
-class ImportZMOWithArmature(bpy.types.Operator, ImportHelper):
-    """Import ZMO animation along with an armature (ZMD)"""
-    bl_idname = "rose.import_zmo_with_armature"
-    bl_label = "ROSE Animation with Armature"
-    bl_options = {"PRESET", "UNDO"}
-    
-    filename_ext = ".zmo"
-    filter_glob: StringProperty(
-        default="*.zmo;*.ZMO",
-        options={"HIDDEN"}
-    )
-    
-    armature_path: StringProperty(
-        name="Armature Path",
-        description="Path to ZMD armature file (leave empty to search automatically)",
-        default="",
-        subtype='FILE_PATH'
-    )
-    
-    scale_factor: FloatProperty(
-        name="Scale Factor",
-        description="Scale factor for position keyframes",
-        default=0.01,
-        min=0.0001,
-        max=100.0,
-    )
-    
-    convert_coordinates: BoolProperty(
-        name="Convert Coordinates",
-        description="Convert from ROSE coordinate system to Blender coordinate system",
-        default=True,
-    )
-    
-    def execute(self, context):
-        # This would combine ZMD and ZMO import in one step
-        # For now, just use the regular ZMO import
-        self.report({'INFO'}, "Use ImportZMO operator instead")
-        return {"FINISHED"}
-
-
 def menu_func_import(self, context):
     self.layout.operator(ImportZMO.bl_idname, text="ROSE Animation (.zmo)")
 
 
 def register():
     bpy.utils.register_class(ImportZMO)
-    bpy.utils.register_class(ImportZMOWithArmature)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
 
 
 def unregister():
     bpy.utils.unregister_class(ImportZMO)
-    bpy.utils.unregister_class(ImportZMOWithArmature)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
 
 
