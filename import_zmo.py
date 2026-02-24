@@ -8,6 +8,7 @@ imported from ZMD files.
 from pathlib import Path
 import bpy
 import mathutils
+from mathutils import Quaternion, Vector, Matrix
 from bpy.props import StringProperty, IntProperty, FloatProperty
 from bpy_extras.io_utils import ImportHelper
 
@@ -116,6 +117,10 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
         bone_names = [bone.name for bone in armature_obj.data.bones]
         bone_channels = zmo.get_bone_channels()
         
+        # Ensure all pose bones use quaternion rotation mode
+        for pose_bone in armature_obj.pose.bones:
+            pose_bone.rotation_mode = 'QUATERNION'
+        
         for bone_index, channels in bone_channels.items():
             if bone_index >= len(bone_names):
                 continue
@@ -135,7 +140,11 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
                 self._apply_scale_channel(action, bone_name, scale_channel)
     
     def _apply_position_channel(self, action, bone_name, channel):
-        """Apply position keyframes to a bone."""
+        """Apply position keyframes to a bone.
+        
+        ZMO position values are scaled from cm to meters.
+        Apply coordinate transformation using rotation matrix.
+        """
         data_path = f'pose.bones["{bone_name}"].location'
         
         fcurves = []
@@ -148,17 +157,23 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
         for frame_idx, pos in enumerate(channel.values):
             frame = self.start_frame + frame_idx
             
-            # Scale positions from cm to m
+            # Apply position with scale factor (cm to m)
+            # Transform position: rotate90 degrees around X axis
+            # (x, y, z) -> (x, -z, y) for Y-up to Z-up
             x = pos.x * self.scale_factor
-            y = pos.y * self.scale_factor
-            z = pos.z * self.scale_factor
+            y = -pos.z * self.scale_factor  # -Z becomes Y
+            z = pos.y * self.scale_factor   # Y becomes Z
             
             fcurves[0].keyframe_points.insert(frame, x)
             fcurves[1].keyframe_points.insert(frame, y)
             fcurves[2].keyframe_points.insert(frame, z)
     
     def _apply_rotation_channel(self, action, bone_name, channel):
-        """Apply rotation keyframes to a bone."""
+        """Apply rotation keyframes to a bone.
+        
+        ZMO stores quaternions in WXYZ order.
+        Apply coordinate transformation using quaternion multiplication.
+        """
         data_path = f'pose.bones["{bone_name}"].rotation_quaternion'
         
         fcurves = []
@@ -168,24 +183,29 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
                 fcurve = action.fcurves.new(data_path, index=i)
             fcurves.append(fcurve)
         
+        # Pre-compute transformation quaternion
+        # 90-degree rotation around X axis: (0.707, 0.707, 0, 0)
+        # We need to transform from ROSE space to Blender space
+        from math import sqrt
+        half_sqrt2 = sqrt(2) / 2
+        transform_quat = Quaternion((half_sqrt2, half_sqrt2, 0, 0))  # 90 deg around X
+        
         for frame_idx, quat in enumerate(channel.values):
             frame = self.start_frame + frame_idx
             
-            # Use quaternion directly from ZMO (WXYZ order)
-            w, x, y, z = quat.w, quat.x, quat.y, quat.z
+            # ZMO stores quaternion in WXYZ order
+            # mathutils Quaternion expects (w, x, y, z)
+            q = Quaternion((quat.w, quat.x, quat.y, quat.z))
+            q.normalize()
             
-            # Normalize
-            length = (w*w + x*x + y*y + z*z) ** 0.5
-            if length > 0:
-                w /= length
-                x /= length
-                y /= length
-                z /= length
+            # Apply transformation: q' = transform * q * transform^-1
+            # For a pure rotation change of basis
+            q_transformed = transform_quat @ q @ transform_quat.inverted()
             
-            fcurves[0].keyframe_points.insert(frame, w)
-            fcurves[1].keyframe_points.insert(frame, x)
-            fcurves[2].keyframe_points.insert(frame, y)
-            fcurves[3].keyframe_points.insert(frame, z)
+            fcurves[0].keyframe_points.insert(frame, q_transformed.w)
+            fcurves[1].keyframe_points.insert(frame, q_transformed.x)
+            fcurves[2].keyframe_points.insert(frame, q_transformed.y)
+            fcurves[3].keyframe_points.insert(frame, q_transformed.z)
     
     def _apply_scale_channel(self, action, bone_name, channel):
         """Apply scale keyframes to a bone."""
