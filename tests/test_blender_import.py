@@ -60,6 +60,8 @@ def main():
     assert faces > 60000, "expected ~67081 terrain faces"
     assert len(terrain.data.uv_layers) >= 2, "expected UVMap + UVMap_rot"
     assert len(terrain.data.materials) > 10, "expected per-pair terrain materials"
+    assert any(o.type == "LIGHT" and o.data.type == "SUN" for o in bpy.context.scene.objects), \
+        "expected ROSE_Sun light from setup_lighting"
 
     print("SMOKE TEST OK")
     return 0

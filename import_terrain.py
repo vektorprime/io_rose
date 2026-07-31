@@ -29,6 +29,14 @@ class ImportTerrain(bpy.types.Operator, ImportHelper):
         description="Automatically detect and load textures from ZON file",
         default=True,
     )
+
+    setup_lighting: BoolProperty(
+        name="Setup scene lighting",
+        description="Add a sun light and world ambient so the terrain is "
+                    "visible in Rendered viewport mode (the game uses a "
+                    "strong directional light plus ambient)",
+        default=True,
+    )
     
     limit_tiles: BoolProperty(
         name="Limit Tiles",
@@ -205,9 +213,22 @@ class ImportTerrain(bpy.types.Operator, ImportHelper):
                 image = bpy.data.images.get(Path(resolved).name)
                 if not image:
                     image = bpy.data.images.load(resolved)
+                # Terrain tiles are sRGB-encoded but must be sampled raw:
+                # Blender's sRGB mipmap pipeline darkens minified samples to
+                # black (double sRGB->linear conversion on mip levels).
+                # Load as Non-Color and linearize manually with Gamma nodes.
+                image.colorspace_settings.name = "Non-Color"
                 return image
             except Exception:
                 return None
+
+        def connect_color(tex_node, target_socket):
+            """tex Color -> Gamma(2.2) -> target (manual sRGB linearization)."""
+            gamma = nodes.new(type='ShaderNodeGamma')
+            gamma.location = (tex_node.location.x + 250, tex_node.location.y)
+            gamma.inputs['Gamma'].default_value = 2.2
+            links.new(tex_node.outputs['Color'], gamma.inputs['Color'])
+            links.new(gamma.outputs['Color'], target_socket)
 
         image1 = load_image(l1)
         image2 = load_image(l2) if l2 != l1 else None
@@ -237,19 +258,43 @@ class ImportTerrain(bpy.types.Operator, ImportHelper):
                 mix.data_type = 'RGBA'
                 mix.location = (-300, 0)
                 links.new(tex2.outputs['Alpha'], mix.inputs['Factor'])
-                links.new(tex1.outputs['Color'], mix.inputs['A'])
-                links.new(tex2.outputs['Color'], mix.inputs['B'])
+                connect_color(tex1, mix.inputs['A'])
+                connect_color(tex2, mix.inputs['B'])
                 links.new(mix.outputs['Result'], bsdf.inputs['Base Color'])
             else:
-                links.new(tex2.outputs['Color'], bsdf.inputs['Base Color'])
+                connect_color(tex2, bsdf.inputs['Base Color'])
         else:
             tex1 = nodes.new(type='ShaderNodeTexImage')
             tex1.location = (-300, 0)
             tex1.image = image1
-            links.new(tex1.outputs['Color'], bsdf.inputs['Base Color'])
+            connect_color(tex1, bsdf.inputs['Base Color'])
 
         links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])
         return mat
+
+    def setup_scene_lighting(self, context):
+        """Add a sun light and world ambient so the terrain is visible in
+        Rendered viewport mode (the game renders with a strong directional
+        light plus ambient; a bare scene leaves the terrain nearly black)."""
+        import math
+        scene = context.scene
+        sun = None
+        for obj in scene.objects:
+            if obj.type == "LIGHT" and obj.data.type == "SUN":
+                sun = obj
+                break
+        if sun is None:
+            sun_data = bpy.data.lights.new("ROSE_Sun", type="SUN")
+            sun_data.energy = 2.5
+            sun_data.angle = math.radians(10.0)
+            sun = bpy.data.objects.new("ROSE_Sun", sun_data)
+            sun.rotation_euler = (math.radians(55), 0, math.radians(25))
+            scene.collection.objects.link(sun)
+        world = scene.world
+        if world and world.use_nodes:
+            bg = world.node_tree.nodes.get("Background")
+            if bg and bg.inputs[1].default_value < 0.3:
+                bg.inputs[1].default_value = 0.5
 
     def execute(self, context):
         import time
@@ -597,6 +642,10 @@ class ImportTerrain(bpy.types.Operator, ImportHelper):
             # Create terrain object at origin
             terrain_obj = bpy.data.objects.new("ROSE_Terrain", mesh)
             context.collection.objects.link(terrain_obj)
+
+            # Sun light + ambient so Rendered mode matches the game's look
+            if self.setup_lighting:
+                self.setup_scene_lighting(context)
 
         except Exception as e:
             self.report({'ERROR'}, f"Import failed: {str(e)}")

@@ -113,6 +113,18 @@ def main():
     assert dds, "no DDS textures loaded"
     assert all(img.channels == 4 for img in dds), "DDS textures lost their alpha channel"
 
+    # sRGB mipmap bug fix: textures load as Non-Color with manual Gamma(2.2)
+    # (Blender double-converts sRGB mip levels, turning minified dark texels
+    # into black patches - see architecture/zone-terrain-transparency-issue.md)
+    assert all(img.colorspace_settings.name == "Non-Color" for img in dds), \
+        "terrain images must be Non-Color (sRGB mip darkening bug)"
+    gamma_mats = 0
+    for m in mats:
+        if any(n.type == "GAMMA" for n in m.node_tree.nodes):
+            gamma_mats += 1
+    print(f"materials with Gamma(2.2): {gamma_mats}/{len(mats)}")
+    assert gamma_mats == len(mats), "every terrain material needs a Gamma node"
+
     print("MATERIALS TEST OK")
     return 0
 

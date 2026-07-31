@@ -11,6 +11,7 @@ addon relates to the Rust reference implementation
 | [rose-file-formats.md](rose-file-formats.md) | Binary layouts of ZON / HIM / TIL / IFO (ground truth: `rose-file-readers` crate). |
 | [rose-offline-client-zone-loading.md](rose-offline-client-zone-loading.md) | How the Bevy client loads zones: 64x64 block grid, sparse tiles, world-space mapping, coordinate transforms. |
 | [blender-importer.md](blender-importer.md) | How `import_map.py` imports `.zon` maps: pipeline, mesh generation, inter-tile stitching, materials, pitfalls. |
+| [zone-terrain-transparency-issue.md](zone-terrain-transparency-issue.md) | Investigation of the "black unblended textures" report: DXT3 alpha masks, blend verification, scene lighting. |
 
 ## Key takeaways from the 2026-07-31 session (sparse-tile crash)
 
