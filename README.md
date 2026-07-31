@@ -19,3 +19,8 @@ And here's the zone/map:
 Here is an example of me loading the JDT .zon file:
 
 <img width="1540" height="806" alt="image" src="https://github.com/user-attachments/assets/a9741fed-5356-4ec1-bce8-4bc4060b5850" />
+
+
+NOTE:
+
+Ignore the combined zone stuff for now that's beta testing a new feature
