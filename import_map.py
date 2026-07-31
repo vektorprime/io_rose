@@ -65,18 +65,6 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         description="Y coordinate of tile to load (if Limit Tiles enabled)",
         default=30,
     )
-    
-    world_offset_x: bpy.props.FloatProperty(
-        name="World Offset X",
-        description="World offset in meters for X axis (default52.0m = 5200cm)",
-        default=52.0,
-    )
-    
-    world_offset_y: bpy.props.FloatProperty(
-        name="World Offset Y",
-        description="World offset in meters for Y axis (default52.0m = 5200cm)",
-        default=52.0,
-    )
 
     texture_extensions = [".DDS", ".dds", ".PNG", ".png"]
 
@@ -580,12 +568,10 @@ class ImportMap(bpy.types.Operator, ImportHelper):
             zon = Zon(self.filepath)
             zon_dir = os.path.dirname(self.filepath)
 
-            # CRITICAL: Calculate grid scale and world offset to match object coordinates
-            # Rust reference: positions are divided by 100 (cm to m) then offset by 5200cm = 52m
-            grid_scale = zon.grid_size / 100.0  # Convert grid_size (cm) to meters
-            # Use configurable world offset (default52.0m = 5200cm for standard maps)
-            world_offset_x = self.world_offset_x
-            world_offset_y = self.world_offset_y
+            # CRITICAL: Convert grid_size (cm) to meters.
+            # Terrain and objects share one absolute world space (see vertex
+            # generation below): block corner = 160.0 * block_coord - 5200.0 m.
+            grid_scale = zon.grid_size / 100.0
 
             tiles = SimpleNamespace()
             tiles.min_pos = Vector2(999, 999)
@@ -623,7 +609,6 @@ class ImportMap(bpy.types.Operator, ImportHelper):
             tiles.hims = list_2d(tiles.dimension.y, tiles.dimension.x)
             tiles.tils = list_2d(tiles.dimension.y, tiles.dimension.x)
             tiles.ifos = list_2d(tiles.dimension.y, tiles.dimension.x)
-            tiles.offsets = list_2d(tiles.dimension.y, tiles.dimension.x)
 
             # Load HIM/TIL/IFO files
             for x, y in tiles.coords:
@@ -657,23 +642,16 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                     if self.verbose_logging:
                         self.report({'WARNING'}, f"Failed to load tile {tile_name}: {str(e)}")
 
-            # Calculate tile offsets (in grid units, will be multiplied by grid_scale later)
-            length, cur_length = 0, 0
-            for y in range(tiles.dimension.y):
-                width = 0
-                for x in range(tiles.dimension.x):
-                    him = tiles.hims[y][x]
-                    if him:
-                        offset = Vector2(width, length)
-                        tiles.offsets[y][x] = offset
-                        width += him.width
-                        cur_length = him.length
-                length += cur_length
-
             wm.progress_update(30)
             t = record_time("Load tile data", t)
             
             # Generate terrain mesh with PROPER WORLD COORDINATES
+            # Absolute world space matching the Rust client (spawning/terrain.rs):
+            #   block corner = 160.0 * block_coord - 5200.0 meters (block 0..63),
+            #   heightmap samples every grid_scale meters (160.0 = 64 * grid_scale)
+            # Terrain and IFO objects share this space: object pos is cm / 100.
+            block_size = 64.0 * grid_scale
+            world_origin = -32.5 * block_size
             vertices = []
             edges = []
             faces = []
@@ -685,22 +663,23 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                         
                     indices = tiles.indices[y][x]
                     him = tiles.hims[y][x]
-                    offset_x = tiles.offsets[y][x].x
-                    offset_y = tiles.offsets[y][x].y
+                    block_x = x + tiles.min_pos.x
+                    block_y = y + tiles.min_pos.y
+                    base_x = block_x * block_size + world_origin
+                    base_y = block_y * block_size + world_origin
 
                     for vy in range(him.length):
                         for vx in range(him.width):
-                            # Both Rose and Blender use Z-up coordinate systems
-                            # Only negate Y for forward direction difference
-                            # Transform: (x, y, z) -> (x, -y, z)
-                            
+                            # Both Rose and Blender use Z-up coordinate systems.
+                            # Object conversion uses (x, -y, z) / 100, and the
+                            # client terrain formula already folds in the Y flip,
+                            # so terrain Y is not negated again here.
                             height = him.heights[vy][vx] / 100.0
                             
-                            world_x = (vx + offset_x) * grid_scale + world_offset_x
-                            world_y = (vy + offset_y) * grid_scale + world_offset_y
+                            world_x = base_x + vx * grid_scale
+                            world_y = base_y + vy * grid_scale
                             
-                            # Apply Blender Z-up transform: negate Y, keep Z positive
-                            vertices.append((world_x, -world_y, height))
+                            vertices.append((world_x, world_y, height))
                             vi = len(vertices) - 1
                             him.indices[vy][vx] = vi
                             indices[vy][vx] = vi
@@ -724,13 +703,19 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                     is_x_edge = (x == tiles.dimension.x - 1)
                     is_y_edge = (y == tiles.dimension.y - 1)
 
+                    # Skip connections to neighboring tiles that don't exist on disk
+                    # (zones are sparse grids; missing tiles are skipped like the Rust client)
+                    has_x_neighbor = not is_x_edge and bool(tiles.indices[y][x + 1])
+                    has_y_neighbor = not is_y_edge and bool(tiles.indices[y + 1][x])
+                    has_xy_neighbor = has_x_neighbor and has_y_neighbor and bool(tiles.indices[y + 1][x + 1])
+
                     for vy in range(him.length):
                         for vx in range(him.width):
                             is_x_edge_vertex = (vx == him.width - 1) and (vy < him.length - 1)
                             is_y_edge_vertex = (vx < him.width - 1) and (vy == him.length - 1)
                             is_corner_vertex = (vx == him.width - 1) and (vy == him.length - 1)
 
-                            if not is_x_edge and is_x_edge_vertex:
+                            if has_x_neighbor and is_x_edge_vertex:
                                 next_indices = tiles.indices[y][x + 1]
                                 v1 = indices[vy][vx]
                                 v2 = next_indices[vy][0]
@@ -739,7 +724,7 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                                 edges += ((v1, v2), (v2, v3), (v3, v4), (v4, v1))
                                 faces.append((v1, v2, v3, v4))
 
-                            if not is_y_edge and is_y_edge_vertex:
+                            if has_y_neighbor and is_y_edge_vertex:
                                 next_indices = tiles.indices[y + 1][x]
                                 v1 = indices[vy][vx]
                                 v2 = indices[vy][vx + 1]
@@ -748,21 +733,19 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                                 edges += ((v1, v2), (v2, v3), (v3, v4), (v4, v1))
                                 faces.append((v1, v2, v3, v4))
 
-                            if not is_x_edge and not is_y_edge and is_corner_vertex:
+                            if has_xy_neighbor and is_corner_vertex:
                                 right = tiles.indices[y][x + 1]
                                 diag = tiles.indices[y + 1][x + 1]
                                 down = tiles.indices[y + 1][x]
-                                
-                                if tiles.hims[y + 1][x + 1] and tiles.hims[y + 1][x]:
-                                    diag_him = tiles.hims[y + 1][x + 1]
-                                    down_him = tiles.hims[y + 1][x]
+                                diag_him = tiles.hims[y + 1][x + 1]
+                                down_him = tiles.hims[y + 1][x]
 
-                                    v1 = indices[vy][vx]
-                                    v2 = right[diag_him.length - 1][0]
-                                    v3 = diag[0][0]
-                                    v4 = down[0][down_him.width - 1]
-                                    edges += ((v1, v2), (v2, v3), (v3, v4), (v4, v1))
-                                    faces.append((v1, v2, v3, v4))
+                                v1 = indices[vy][vx]
+                                v2 = right[diag_him.length - 1][0]
+                                v3 = diag[0][0]
+                                v4 = down[0][down_him.width - 1]
+                                edges += ((v1, v2), (v2, v3), (v3, v4), (v4, v1))
+                                faces.append((v1, v2, v3, v4))
 
             # Create terrain mesh
             mesh = bpy.data.meshes.new("ROSE_Terrain")
@@ -811,6 +794,12 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                             til = tiles.tils[ty][tx]
                             is_x_edge = (tx == tiles.dimension.x - 1)
                             is_y_edge = (ty == tiles.dimension.y - 1)
+
+                            # Must mirror the stitching loop: only count faces
+                            # for neighbors that actually exist on disk
+                            has_x_neighbor = not is_x_edge and bool(tiles.indices[ty][tx + 1])
+                            has_y_neighbor = not is_y_edge and bool(tiles.indices[ty + 1][tx])
+                            has_xy_neighbor = has_x_neighbor and has_y_neighbor and bool(tiles.indices[ty + 1][tx + 1])
                             
                             # Get TIL dimensions once
                             til_width = len(til.tiles[0]) if til and til.tiles else 0
@@ -830,7 +819,7 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                                     face_idx += 1
                             
                             # Inter-tile X edge faces
-                            if not is_x_edge:
+                            if has_x_neighbor:
                                 for vy in range(him.length - 1):
                                     if face_idx < len(faces) and til and til.tiles:
                                         til_x = min(him.width - 1, til_width - 1)
@@ -843,7 +832,7 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                                     face_idx += 1
                             
                             # Inter-tile Y edge faces
-                            if not is_y_edge:
+                            if has_y_neighbor:
                                 for vx in range(him.width - 1):
                                     if face_idx < len(faces) and til and til.tiles:
                                         til_x = min(vx, til_width - 1)
@@ -856,17 +845,16 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                                     face_idx += 1
                             
                             # Corner faces
-                            if not is_x_edge and not is_y_edge:
-                                if tiles.hims[ty + 1][tx + 1] and tiles.hims[ty + 1][tx]:
-                                    if face_idx < len(faces) and til and til.tiles:
-                                        til_x = min(him.width - 1, til_width - 1)
-                                        til_y = min(him.length - 1, til_height - 1)
-                                        til_patch = til.tiles[til_y][til_x]
-                                        if til_patch.tile < len(zon_tile_textures):
-                                            tex_idx = zon_tile_textures[til_patch.tile]
-                                            if tex_idx in texture_to_slot:
-                                                material_indices[face_idx] = texture_to_slot[tex_idx]
-                                    face_idx += 1
+                            if has_xy_neighbor:
+                                if face_idx < len(faces) and til and til.tiles:
+                                    til_x = min(him.width - 1, til_width - 1)
+                                    til_y = min(him.length - 1, til_height - 1)
+                                    til_patch = til.tiles[til_y][til_x]
+                                    if til_patch.tile < len(zon_tile_textures):
+                                        tex_idx = zon_tile_textures[til_patch.tile]
+                                        if tex_idx in texture_to_slot:
+                                            material_indices[face_idx] = texture_to_slot[tex_idx]
+                                face_idx += 1
                     
                     # Batch assign material indices to polygons
                     for i, mat_idx in enumerate(material_indices):
@@ -1020,8 +1008,9 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         # Convert ROSE coordinates to Blender (X, -Y, Z) and scale by 1/100
         pos = ifo_object.position
         bx, by, bz = convert_rose_position_to_blender(pos.x, pos.y, pos.z)
-        # Apply configurable world offset to match terrain coordinates (only horizontal X, Y)
-        parent_empty.location = (bx + self.world_offset_x, by + self.world_offset_y, bz)
+        # IFO positions are absolute world cm; terrain uses the same space
+        # (see terrain vertex generation), so no additional offset is applied.
+        parent_empty.location = (bx, by, bz)
 
         
         # Convert rotation from IFO (XYZW order) to Blender (WXYZ order)

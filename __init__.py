@@ -2,7 +2,7 @@ bl_info = {
     "name": "ROSE Online blender plugin",
     "author": "Ralph Minderhoud and Ryko",
     "blender": (2, 77, 0),
-    "version": (0, 0, 6),
+    "version": (0, 0, 7),
     "location": "File > Import",
     "description": "Import files from ROSE Online",
     "category": "Import-Export",
@@ -14,9 +14,15 @@ if "bpy" in locals():
         importlib.reload(import_map)
     if "import_terrain" in locals():
         importlib.reload(import_terrain)
+    if "import_converted_terrain" in locals():
+        importlib.reload(import_converted_terrain)
+    if "import_combined_zone" in locals():
+        importlib.reload(import_combined_zone)
 else:
     from .import_map import ImportMap
     from .import_terrain import ImportTerrain
+    from .import_converted_terrain import ImportConvertedTerrain
+    from .import_combined_zone import ImportCombinedZone
     from .import_zmd import ImportZMD
     from .import_zms import ImportZMS
     from .export_zms import ExportZMS
@@ -31,16 +37,20 @@ def menu_func_export(self, context):
     
 def menu(self, context):
     self.layout.separator()
+    self.layout.operator(ImportCombinedZone.bl_idname, text="ROSE Zone (Converted Terrain + Assets)")
     self.layout.operator(ImportMap.bl_idname, text="ROSE Map (.zon)")
     self.layout.operator(ImportTerrain.bl_idname, text="ROSE Terrain Only (.zon)")
+    self.layout.operator(ImportConvertedTerrain.bl_idname, text="Converted ROSE Terrain (.mesh.bin)")
     self.layout.operator(ImportZMD.bl_idname, text=ImportZMD.bl_label)
     self.layout.operator(ImportZMS.bl_idname, text=ImportZMS.bl_label)
     self.layout.operator(ImportZMSwithZMD.bl_idname, text=ImportZMSwithZMD.bl_label)
     self.layout.operator(ImportZMO.bl_idname, text=ImportZMO.bl_label)
 
 def register():
+    bpy.utils.register_class(ImportCombinedZone)
     bpy.utils.register_class(ImportMap)
     bpy.utils.register_class(ImportTerrain)
+    bpy.utils.register_class(ImportConvertedTerrain)
     bpy.utils.register_class(ImportZMD)
     bpy.utils.register_class(ImportZMS)
     bpy.utils.register_class(ExportZMS)
@@ -51,8 +61,10 @@ def register():
     bpy.utils.register_class(ImportZSC)
 
 def unregister():
+    bpy.utils.unregister_class(ImportCombinedZone)
     bpy.utils.unregister_class(ImportMap)
     bpy.utils.unregister_class(ImportTerrain)
+    bpy.utils.unregister_class(ImportConvertedTerrain)
     bpy.utils.unregister_class(ImportZMD)
     bpy.utils.unregister_class(ImportZMS)
     bpy.utils.unregister_class(ExportZMS)

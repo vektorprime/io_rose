@@ -144,6 +144,11 @@ class Zon:
                     for j in range(texture_count):
                         self.textures.append(read_bstr(f))
 
+                    # The texture list is terminated by an "end" sentinel
+                    # (the Rust client stops loading at the first "end" entry).
+                    if "end" in self.textures:
+                        self.textures = self.textures[:self.textures.index("end")]
+
                 elif block_type == BlockType.Tiles:
                     tile_count = read_i32(f)
 

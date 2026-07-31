@@ -113,9 +113,23 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
         return None
     
     def _apply_animation(self, armature_obj, action, zmo):
-        """Apply ZMO animation data to armature."""
+        """Apply ZMO animation data to armature.
+        
+        CRITICAL INSIGHT: The ZMD skeleton importer does NOT apply coordinate transformation.
+        It uses raw ROSE coordinates. Therefore, the ZMO animation must also use raw ROSE
+        coordinates to match.
+        
+        The Rust client applies (x, z, -y) transform to BOTH skeleton AND animation,
+        so they match. Our Blender plugin applies NO transform to either, so they also match.
+        """
         bone_names = [bone.name for bone in armature_obj.data.bones]
         bone_channels = zmo.get_bone_channels()
+        
+        # Debug logging
+        print(f"=== ZMO Animation Debug ===")
+        print(f"Armature: {armature_obj.name}")
+        print(f"Number of bones in armature: {len(bone_names)}")
+        print(f"Number of bone channels in ZMO: {len(bone_channels)}")
         
         # Ensure all pose bones use quaternion rotation mode
         for pose_bone in armature_obj.pose.bones:
@@ -123,27 +137,42 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
         
         for bone_index, channels in bone_channels.items():
             if bone_index >= len(bone_names):
+                print(f"WARNING: bone_index {bone_index} >= len(bone_names) {len(bone_names)}")
                 continue
             
             bone_name = bone_names[bone_index]
             
+            # Debug: Log first frame data for each bone
             pos_channel = channels.get(ZmoChannelType.POSITION)
+            rot_channel = channels.get(ZmoChannelType.ROTATION)
+            
+            if rot_channel and isinstance(rot_channel, ZmoRotationChannel):
+                first_rot = rot_channel.values[0] if rot_channel.values else None
+                if first_rot:
+                    print(f"Bone {bone_index} ({bone_name}): first rotation = ({first_rot.w:.4f}, {first_rot.x:.4f}, {first_rot.y:.4f}, {first_rot.z:.4f})")
+            
+            if pos_channel and isinstance(pos_channel, ZmoPositionChannel):
+                first_pos = pos_channel.values[0] if pos_channel.values else None
+                if first_pos:
+                    print(f"Bone {bone_index} ({bone_name}): first position = ({first_pos.x:.4f}, {first_pos.y:.4f}, {first_pos.z:.4f})")
+            
             if pos_channel and isinstance(pos_channel, ZmoPositionChannel):
                 self._apply_position_channel(action, bone_name, pos_channel)
             
-            rot_channel = channels.get(ZmoChannelType.ROTATION)
             if rot_channel and isinstance(rot_channel, ZmoRotationChannel):
                 self._apply_rotation_channel(action, bone_name, rot_channel)
             
             scale_channel = channels.get(ZmoChannelType.SCALE)
             if scale_channel and isinstance(scale_channel, ZmoScaleChannel):
                 self._apply_scale_channel(action, bone_name, scale_channel)
+        
+        print(f"=== End ZMO Animation Debug ===")
     
     def _apply_position_channel(self, action, bone_name, channel):
         """Apply position keyframes to a bone.
         
-        ZMO position values are scaled from cm to meters.
-        Apply coordinate transformation using rotation matrix.
+        NO coordinate transformation - use raw ROSE coordinates to match the skeleton.
+        Scale factor is applied (default 0.01 for cm to m).
         """
         data_path = f'pose.bones["{bone_name}"].location'
         
@@ -157,12 +186,10 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
         for frame_idx, pos in enumerate(channel.values):
             frame = self.start_frame + frame_idx
             
-            # Apply position with scale factor (cm to m)
-            # Transform position: rotate90 degrees around X axis
-            # (x, y, z) -> (x, -z, y) for Y-up to Z-up
+            # Use raw ROSE coordinates (no transform) to match skeleton
             x = pos.x * self.scale_factor
-            y = -pos.z * self.scale_factor  # -Z becomes Y
-            z = pos.y * self.scale_factor   # Y becomes Z
+            y = pos.y * self.scale_factor
+            z = pos.z * self.scale_factor
             
             fcurves[0].keyframe_points.insert(frame, x)
             fcurves[1].keyframe_points.insert(frame, y)
@@ -171,8 +198,7 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
     def _apply_rotation_channel(self, action, bone_name, channel):
         """Apply rotation keyframes to a bone.
         
-        ZMO stores quaternions in WXYZ order.
-        Apply coordinate transformation using quaternion multiplication.
+        NO coordinate transformation - use raw ROSE coordinates to match the skeleton.
         """
         data_path = f'pose.bones["{bone_name}"].rotation_quaternion'
         
@@ -183,29 +209,28 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
                 fcurve = action.fcurves.new(data_path, index=i)
             fcurves.append(fcurve)
         
-        # Pre-compute transformation quaternion
-        # 90-degree rotation around X axis: (0.707, 0.707, 0, 0)
-        # We need to transform from ROSE space to Blender space
-        from math import sqrt
-        half_sqrt2 = sqrt(2) / 2
-        transform_quat = Quaternion((half_sqrt2, half_sqrt2, 0, 0))  # 90 deg around X
-        
         for frame_idx, quat in enumerate(channel.values):
             frame = self.start_frame + frame_idx
             
-            # ZMO stores quaternion in WXYZ order
+            # Use raw ROSE quaternion (no transform) to match skeleton
             # mathutils Quaternion expects (w, x, y, z)
-            q = Quaternion((quat.w, quat.x, quat.y, quat.z))
-            q.normalize()
+            w = quat.w
+            x = quat.x
+            y = quat.y
+            z = quat.z
             
-            # Apply transformation: q' = transform * q * transform^-1
-            # For a pure rotation change of basis
-            q_transformed = transform_quat @ q @ transform_quat.inverted()
+            # Normalize
+            length = (w*w + x*x + y*y + z*z) ** 0.5
+            if length > 0:
+                w /= length
+                x /= length
+                y /= length
+                z /= length
             
-            fcurves[0].keyframe_points.insert(frame, q_transformed.w)
-            fcurves[1].keyframe_points.insert(frame, q_transformed.x)
-            fcurves[2].keyframe_points.insert(frame, q_transformed.y)
-            fcurves[3].keyframe_points.insert(frame, q_transformed.z)
+            fcurves[0].keyframe_points.insert(frame, w)
+            fcurves[1].keyframe_points.insert(frame, x)
+            fcurves[2].keyframe_points.insert(frame, y)
+            fcurves[3].keyframe_points.insert(frame, z)
     
     def _apply_scale_channel(self, action, bone_name, channel):
         """Apply scale keyframes to a bone."""

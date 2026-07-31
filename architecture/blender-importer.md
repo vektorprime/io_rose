@@ -1,0 +1,135 @@
+# Blender Addon: Map Import Pipeline (`import_map.py`)
+
+This addon (`io_rose`, Blender 4.5) mirrors the Rust client's zone loading:
+it reads the same `.zon`/`.him`/`.til`/`.ifo` files and rebuilds the terrain
+mesh in Blender.
+
+## Addon layout
+
+```
+io_rose/
+  __init__.py               operator registration, menu items
+  import_map.py             .zon map import (terrain + IFO objects)
+  import_terrain.py         older terrain-only variant
+  import_combined_zone.py   combined zone import variant
+  import_converted_terrain.py
+  import_zms.py / import_zms_zmd.py / import_zmd.py / import_zmo.py / import_zsc.py
+  export_zms.py             mesh export
+  test_zon.py               ZON parser self-test
+  rose/                     format parsers (pure Python, no bpy):
+    him.py til.py zon.py ifo.py zsc.py zms.py zmd.py zmo.py utils.py
+  architecture/             this documentation
+```
+
+Parsers depend only on `struct` and can be run/tested outside Blender.
+
+## Import pipeline (execute)
+
+1. **Locate 3DDATA root** by walking up from the `.zon` path
+   (`MAPS/{PLANET}/{ZONE}/file.zon`).
+2. **Load ZSC files**: `LIST_CNST_{zone_code}.ZSC` and all
+   `LIST_DECO_*.ZSC` from the planet folder (used for IFO object models).
+3. **Scan tile directory** (`zon_dir`) for `*.HIM` files; each
+   `{x}_{y}.HIM` is a grid coordinate. Tiles present on disk are a **sparse
+   subset** of the zone's 64x64 grid (JDT01: only 31_30..34_33 = 16 tiles).
+4. **Load per tile**: HIM (heightmap), TIL (tile/texture map), IFO
+   (objects; failures degrade gracefully to None).
+5. **Generate terrain mesh**:
+   - Vertices: one per HIM sample, in **absolute world coordinates matching
+     the Rust client**: `block corner = 160.0 * block_coord - 5200.0` meters
+     (block_size = 64 * grid_scale, world_origin = -32.5 * block_size),
+     samples spaced `grid_scale = grid_size/100` apart. No per-tile offset
+     accumulation and no Y negation: the client's terrain formula already
+     folds in the Y flip so it aligns with the object conversion
+     `(x, -y, z)/100`.
+   - Main quads per tile: `(w-1) x (l-1)` faces.
+   - Inter-tile stitch faces: X-edge, Y-edge, and corner quads that bridge
+     the shared sample edges between adjacent tiles. Tile-to-tile stride is
+     64 samples (160 m), matching the client's block size - never 65, or
+     adjacent tiles drift 2.5 m apart.
+6. **Materials**: ZON texture list -> per-texture Principled materials;
+   each TIL patch's `tile` index -> `zon.tiles[i].layer1 + offset1` ->
+   texture slot, assigned to faces in the exact order faces were appended.
+7. **Spawn IFO objects** (CNST/DECO) using the ZSC files, cached materials
+   and mesh instancing.
+
+## Face ordering contract (critical!)
+
+Faces are appended per tile in this order, and the material-index pass must
+count them in exactly the same order:
+
+1. Main quads: `(length-1) * (width-1)` per tile
+2. X-edge stitch faces: `(length-1)` per tile (only if right neighbor exists)
+3. Y-edge stitch faces: `(width-1)` per tile (only if bottom neighbor exists)
+4. Corner stitch face: 1 per tile (only if all three neighbors exist)
+
+Any change to one loop must be mirrored in the other, or `face_idx` drifts
+and polygons get wrong material slots.
+
+## Sparse tiles: the 2026-07-31 bug fix
+
+Symptom (importing JDT01.ZON):
+
+```
+File "import_map.py", line 736, in execute
+    v2 = next_indices[vy][0]
+TypeError: 'NoneType' object is not subscriptable
+```
+
+Root cause: the stitching loop used `tiles.indices[y][x + 1]` and
+`tiles.indices[y + 1][x]` unconditionally. On sparse maps the neighbor tile
+never loaded, so its slot was `None`. The Rust client handles this by
+skipping `None` blocks; the addon did not.
+
+Fix (matching the Rust behavior):
+
+- Compute per tile:
+  `has_x_neighbor`, `has_y_neighbor`, `has_xy_neighbor` (all three neighbors
+  for the corner face - the old code only checked two, which could still
+  crash via the unguarded `right` access).
+- The stitching loop only emits stitch faces when the neighbor exists.
+- The material-index loop uses the identical predicates so face counting
+  stays aligned.
+
+Verified: 10 sparse-grid configurations (including JDT01 with tiles forced
+missing) all keep face counts aligned; no crash; all face vertex indices
+valid.
+
+## Assets on terrain: the 2026-08-01 coordinate fix
+
+Symptom: `.zon` imports fine, but IFO objects (CNST/DECO) are offset from the
+terrain (they stay aligned relative to each other).
+
+Root cause: the addon placed the terrain at `+52 m` world offset with a
+65-sample per-tile stride (162.5 m) and a negated Y, while objects were
+placed at `(x, -y, z)/100 + 52 m`. The Rust client uses one shared absolute
+space: terrain block corner = `160 * block_coord - 5200` meters and objects
+at `(x, z, -y)/100` with **no extra offset** (verified against JDT01 DECO
+data: e.g. an object at (-8714.8, 26820.7) cm must land on tile 31_30, whose
+terrain spans x [-240, -80], y [-400, -240] - the old code put it ~292 m
+away).
+
+Fix in `import_map.py`:
+
+- Terrain vertices: `world = block_coord * 160 - 5200 + sample * grid_scale`
+  (both axes), no Y negation, no world offset property.
+- Tile stride is 64 samples (160 m), matching the client; the old per-tile
+  offset accumulation was removed.
+- Objects: `(x/100, -y/100, z/100)`, no world offset.
+- Removed the `world_offset_x/y` operator properties (now meaningless).
+
+Verified: every object in all 16 JDT01 IFO files lands within its own tile's
+terrain bounds; terrain corners match the client exactly (tile 31_30 corner
+at (-240, -400) m).
+
+## Coordinates recap
+
+| System | Rule |
+|--------|------|
+| Rose file data | centimeters, Y-up |
+| Rust client | `(x, y, z) -> (x, z, -y) / 100.0`, terrain block corner `160 * block - 5200` m |
+| Blender addon | terrain `(160*block_x - 5200 + vx*2.5, 160*block_y - 5200 + vy*2.5, h/100)`; objects `(x, -y, z)/100` - same space, no offsets |
+
+Both agree on Z-up; they differ in how the Y axis is folded. The addon's
+convention is the one used by `import_map.py` - keep it consistent when
+adding features.
