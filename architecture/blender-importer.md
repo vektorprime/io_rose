@@ -47,9 +47,16 @@ Parsers depend only on `struct` and can be run/tested outside Blender.
      the shared sample edges between adjacent tiles. Tile-to-tile stride is
      64 samples (160 m), matching the client's block size - never 65, or
      adjacent tiles drift 2.5 m apart.
-6. **Materials**: ZON texture list -> per-texture Principled materials;
-   each TIL patch's `tile` index -> `zon.tiles[i].layer1 + offset1` ->
-   texture slot, assigned to faces in the exact order faces were appended.
+6. **Materials**: the TIL patch grid (16x16 patches, each covering a 4x4
+   quad area) maps to ZON tiles with **two texture layers**. The addon
+   replicates the game shader exactly:
+   - One material per distinct `(layer1, layer2)` pair
+   (`layer1+offset1`, `layer2+offset2`).
+   - Node graph: `mix(layer1, layer2, layer2.alpha)` (DXT3 alpha is the
+     splat mask), layer2 sampled through a rotation-adjusted UV map.
+   - `UVMap`: patch-local 0..1 coords per face corner; `UVMap_rot`: same
+     coords with the patch's ZON rotation (flip H/V, 90 deg) applied.
+   - Material slots are assigned per face in face-append order.
 7. **Spawn IFO objects** (CNST/DECO) using the ZSC files, cached materials
    and mesh instancing.
 

@@ -304,3 +304,74 @@ def convert_rose_position_to_blender(x, y, z):
         Tuple of (x, y, z) for Blender
     """
     return (x / 100.0, -y / 100.0, z / 100.0)
+
+
+def apply_uv_rotation(u, v, rotation):
+    """Rotate patch-local UV coordinates, matching the game shader
+    apply_rotation() (terrain_material.wgsl).
+
+    Args:
+        u: U coordinate (0..1)
+        v: V coordinate (0..1)
+        rotation: ZON tile rotation value (1 = None)
+
+    Returns:
+        (u, v) after applying the rotation
+    """
+    if rotation == 2:      # FlipHorizontal
+        return (1.0 - u, v)
+    elif rotation == 3:    # FlipVertical
+        return (u, 1.0 - v)
+    elif rotation == 4:    # Flip
+        return (1.0 - u, 1.0 - v)
+    elif rotation == 5:    # Clockwise90
+        return (v, 1.0 - u)
+    elif rotation == 6:    # CounterClockwise90
+        return (1.0 - v, u)
+    return (u, v)          # None / Unknown
+
+
+def patch_rotation(til, zon, px, py):
+    """Rotation of the TIL patch at (px, py); 1 (None) if unavailable."""
+    if not til or not til.tiles:
+        return 1
+    til_x = min(px, len(til.tiles[0]) - 1)
+    til_y = min(py, len(til.tiles) - 1)
+    patch = til.tiles[til_y][til_x]
+    if patch.tile < len(zon.tiles):
+        return zon.tiles[patch.tile].rotation
+    return 1
+
+
+def texture_pair(til, zon, px, py, texture_count):
+    """(layer1, layer2) texture indices of the TIL patch at (px, py).
+
+    Matching the Rust client (terrain.rs), which uses both layers and blends
+    them with layer2's alpha channel (terrain_material.wgsl). Invalid
+    indices fall back to the other layer so the pair is canonical.
+
+    Args:
+        til: Til instance or None
+        zon: Zon instance
+        px: patch x index (quad x // 4)
+        py: patch y index (quad y // 4)
+        texture_count: number of entries in zon.textures
+
+    Returns:
+        (layer1_idx, layer2_idx) tuple, or None if the patch is invalid
+    """
+    if not til or not til.tiles:
+        return None
+    til_x = min(px, len(til.tiles[0]) - 1)
+    til_y = min(py, len(til.tiles) - 1)
+    patch = til.tiles[til_y][til_x]
+    if patch.tile >= len(zon.tiles):
+        return None
+    tile = zon.tiles[patch.tile]
+    l1 = tile.layer1 + tile.offset1
+    l2 = tile.layer2 + tile.offset2
+    if l1 >= texture_count:
+        l1 = l2
+    if l2 >= texture_count:
+        l2 = l1
+    return (l1, l2)
