@@ -23,14 +23,17 @@ guard against regressions.
 
 ## Test data
 
-All tests need a real zone directory (HIM/TIL/IFO/ZON files). The default is
-the JDT01 zone from the Bevy client export:
+All tests need a real zone directory (HIM/TIL/IFO/ZON files). The client
+3Ddata root is resolved by `tests/_paths.py` from the `ROSE_CLIENT_3DDATA`
+environment variable, falling back to the default checkout under the
+current user's home:
 
 ```
-C:\Users\vicha\RustroverProjects\rose-offline-client\target\debug\3Ddata\MAPS\JUNON\JDT01
+%USERPROFILE%\RustroverProjects\rose-offline-client\target\debug\3Ddata
 ```
 
-Override with the `ROSE_TEST_ZONE` environment variable to test other zones.
+Override with `ROSE_TEST_ZONE` (zone dir) / `ROSE_TEST_TEXTURES` (tile
+textures) to test other data.
 
 ## Running
 

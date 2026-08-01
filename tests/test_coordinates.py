@@ -14,12 +14,14 @@ import sys
 ADDON_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ADDON_ROOT)
 
+import _paths
+
 from rose.zon import Zon
 from rose.ifo import Ifo
 
 ZONE_DIR = os.environ.get(
     "ROSE_TEST_ZONE",
-    r"C:\Users\vicha\RustroverProjects\rose-offline-client\target\debug\3Ddata\MAPS\JUNON\JDT01",
+    _paths.client_zone_dir(),
 )
 
 GRID_SCALE = 2.5

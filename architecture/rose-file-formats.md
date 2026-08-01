@@ -1,8 +1,8 @@
 # Rose File Formats (Zone Assets)
 
 Ground truth for these layouts is the `rose-file-readers` crate in the
-`rose-offline` workspace:
-`C:\Users\vicha\RustroverProjects\rose-offline\rose-file-readers\src\`.
+`rose-offline` workspace (checkout in `%USERPROFILE%\RustroverProjects`,
+or override the data location with the `ROSE_CLIENT_3DDATA` env var).
 The addon parsers live in `rose/` (`him.py`, `til.py`, `zon.py`, `ifo.py`).
 All integers are little-endian. All floats are f32.
 

@@ -14,10 +14,13 @@ import sys
 
 ADDON_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ADDON_ROOT)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import _paths
 
 TEXTURE_DIR = os.environ.get(
     "ROSE_TEST_TEXTURES",
-    r"C:\Users\vicha\RustroverProjects\rose-offline-client\target\debug\3Ddata\Terrain\Tiles\Junon\JD",
+    _paths.client_terrain_tiles_dir(),
 )
 
 

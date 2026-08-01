@@ -1,7 +1,8 @@
 # rose-offline-client: Zone Loading Architecture
 
 Reference project:
-`C:\Users\vicha\RustroverProjects\rose-offline-client` (Bevy 0.18).
+`rose-offline-client` (Bevy 0.18, workspace `rose-offline`; checkouts at
+`$ROSE_CLIENT_3DDATA`'s parent or `%USERPROFILE%\RustroverProjects`).
 
 ## Workspace layout
 
