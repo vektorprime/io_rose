@@ -1,4 +1,7 @@
 
+This plugin allows you to use Blender 4.5 and modify game asets for Rose Online. I am not the original creator of this, I just had AI modify it.
+
+NOTE: Loading a .zon file can take 3-10 minutes depending on your PC specs.
 
 Once installed, you have these menus:
 
@@ -20,6 +23,14 @@ Here is an example of me loading the JDT .zon file:
 
 <img width="1540" height="806" alt="image" src="https://github.com/user-attachments/assets/a9741fed-5356-4ec1-bce8-4bc4060b5850" />
 
-NOTE: Loading a .zon file can take 3-10 minutes depending on your PC specs.
 
-NOTE: Ignore the converted/combined zone stuff for now that's beta testing a new feature
+
+I copied these assets in Zant:
+<img width="966" height="824" alt="image" src="https://github.com/user-attachments/assets/da61ef5f-f65d-44bb-afd7-56656ce93c55" />
+
+Then I export it
+<img width="1002" height="600" alt="image" src="https://github.com/user-attachments/assets/71ff8551-ce21-4313-bb26-d67a295a95bc" />
+
+
+Confirming that the saved assets worked:
+<img width="1519" height="810" alt="image" src="https://github.com/user-attachments/assets/62f2ef72-af63-4a43-8256-f735e03f12e2" />
