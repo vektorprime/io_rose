@@ -18,6 +18,8 @@ if "bpy" in locals():
         importlib.reload(import_converted_terrain)
     if "import_combined_zone" in locals():
         importlib.reload(import_combined_zone)
+    if "export_zone" in locals():
+        importlib.reload(export_zone)
 else:
     from .import_map import ImportMap
     from .import_terrain import ImportTerrain
@@ -29,11 +31,14 @@ else:
     from .import_zsc import ImportZSC
     from .import_zmo import ImportZMO
     from .import_zms_zmd import ImportZMSwithZMD
+    from .export_zone import ExportZone, AddZoneObject, MarkZoneObjectDeleted
 
 import bpy
 
 def menu_func_export(self, context):
     self.layout.operator(ExportZMS.bl_idname, text="ROSE Mesh (.zms)")
+    self.layout.operator(ExportZone.bl_idname, text="ROSE Zone (.zon) - Save Edited Zone")
+    self.layout.operator(AddZoneObject.bl_idname, text="ROSE Object - Add Selected Mesh to Zone")
     
 def menu(self, context):
     self.layout.separator()
@@ -56,6 +61,9 @@ def register():
     bpy.utils.register_class(ExportZMS)
     bpy.utils.register_class(ImportZMO)
     bpy.utils.register_class(ImportZMSwithZMD)
+    bpy.utils.register_class(ExportZone)
+    bpy.utils.register_class(AddZoneObject)
+    bpy.utils.register_class(MarkZoneObjectDeleted)
     bpy.types.TOPBAR_MT_file_import.append(menu)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
     bpy.utils.register_class(ImportZSC)
@@ -70,6 +78,9 @@ def unregister():
     bpy.utils.unregister_class(ExportZMS)
     bpy.utils.unregister_class(ImportZMO)
     bpy.utils.unregister_class(ImportZMSwithZMD)
+    bpy.utils.unregister_class(ExportZone)
+    bpy.utils.unregister_class(AddZoneObject)
+    bpy.utils.unregister_class(MarkZoneObjectDeleted)
     bpy.types.TOPBAR_MT_file_import.remove(menu)
     bpy.utils.unregister_class(ImportZSC)
 

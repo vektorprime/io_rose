@@ -54,4 +54,20 @@ class Til:
 
                     self.tiles[l][w] = t
 
+    def save(self, filepath):
+        """Write the TIL file: width + length + per tile 3 metadata bytes
+        (brush, tile_index, tile_set) + tile index u32. Matching the Rust
+        map editor's write_til_file() layout; original metadata bytes are
+        preserved when saving a file that was loaded."""
+        with open(filepath, 'wb') as f:
+            write_i32(f, self.width)
+            write_i32(f, self.length)
+            for l in range(self.length):
+                for w in range(self.width):
+                    t = self.tiles[l][w]
+                    write_i8(f, t.brush)
+                    write_i8(f, t.tile_index)
+                    write_i8(f, t.tile_set)
+                    write_u32(f, t.tile)
+
 

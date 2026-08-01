@@ -143,6 +143,24 @@ def read_bstr(f):
     data = f.read(length)
     return decode_string_with_fallback(data)
 
+def read_bstr_raw(f):
+    """Read BSTR and return (decoded string, raw bytes).
+
+    The raw bytes are needed for lossless round-trips: strings stored in
+    EUC-KR on disk would grow when re-encoded as UTF-8 on save.
+    """
+    length = read_u8(f)
+    if length == 0:
+        return "", b""
+    data = f.read(length)
+    return decode_string_with_fallback(data), data
+
+def write_bstr(f, value):
+    """Write BSTR (u8 length prefix + bytes)."""
+    data = value.encode("utf-8") if isinstance(value, str) else bytes(value)
+    f.write(struct.pack("<B", len(data)))
+    f.write(data)
+
 # Read functions for lists
 def read_list_i16(f, count):
     """Read a list of signed 16-bit integers"""

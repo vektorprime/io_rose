@@ -641,6 +641,7 @@ class ImportTerrain(bpy.types.Operator, ImportHelper):
             
             # Create terrain object at origin
             terrain_obj = bpy.data.objects.new("ROSE_Terrain", mesh)
+            terrain_obj["rose_terrain"] = True
             context.collection.objects.link(terrain_obj)
 
             # Sun light + ambient so Rendered mode matches the game's look

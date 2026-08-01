@@ -568,7 +568,6 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                         if self.verbose_logging:
                             self.report({'WARNING'}, f"Failed to load CNST ZSC {candidate}: {str(e)}")
             t = record_time("Load ZSC files", t)
-            
             # --- Load DECO ZSC (Decoration Objects) ---
             # Load ALL available DECO files (some planets have multiple: EJ+EZ, LP+LZ, etc.)
             zsc_deco_list = []
@@ -597,7 +596,20 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                     except Exception as e:
                         if self.verbose_logging:
                             self.report({'WARNING'}, f"Failed to load DECO ZSC {candidate}: {str(e)}")
-            
+
+            # --- Round-trip metadata (used by the zone exporter) ---
+            # Scene-level: where this zone lives in the game data so the
+            # exporter can re-read the original files and write back.
+            scene = context.scene
+            scene["rose_zone_file"] = str(filepath)
+            scene["rose_zone_dir"] = str(filepath.parent)
+            scene["rose_3ddata_root"] = str(root_3ddata)
+            if zsc_cnst:
+                scene["rose_cnst_zsc_path"] = zsc_cnst.filepath
+            else:
+                scene["rose_cnst_zsc_path"] = ""
+            scene["rose_deco_zsc_paths"] = [z.filepath for z in zsc_deco_list]
+
             wm.progress_update(10)
             
             him_ext = ".HIM"
@@ -954,6 +966,7 @@ class ImportMap(bpy.types.Operator, ImportHelper):
             
             # Create terrain object at origin (vertices already in world space)
             terrain_obj = bpy.data.objects.new("ROSE_Terrain", mesh)
+            terrain_obj["rose_terrain"] = True
             context.collection.objects.link(terrain_obj)
 
             # Sun light + ambient so Rendered mode matches the game's look
@@ -1036,20 +1049,26 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                     
                     # Spawn CNST objects
                     if self.load_cnst_objects and zsc_cnst:
-                        for obj_inst in ifo.cnst_objects:                            
+                        block_x = x + tiles.min_pos.x
+                        block_y = y + tiles.min_pos.y
+                        for obj_index, obj_inst in enumerate(ifo.cnst_objects):                            
                             if obj_inst.object_id >= len(zsc_cnst.objects):
                                 pass
                                 continue
                             
                             self.spawn_object(
                                 context, cnst_collection, zsc_cnst, obj_inst,
-                                material_cache_cnst, mesh_cache_cnst, root_3ddata
+                                material_cache_cnst, mesh_cache_cnst, root_3ddata,
+                                block_x=block_x, block_y=block_y,
+                                ifo_block_type="CNST", ifo_index=obj_index
                             )
                             total_cnst += 1
                     
                     # Spawn DECO objects (check all loaded DECO ZSC files)
                     if self.load_deco_objects and zsc_deco_list:
-                        for obj_inst in ifo.deco_objects:
+                        block_x = x + tiles.min_pos.x
+                        block_y = y + tiles.min_pos.y
+                        for obj_index, obj_inst in enumerate(ifo.deco_objects):
                             # Find which ZSC file contains this object_id
                             target_zsc = None
                             for deco_zsc in zsc_deco_list:
@@ -1069,7 +1088,9 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                             
                             self.spawn_object(
                                 context, deco_collection, target_zsc, obj_inst,
-                                temp_cache, mesh_cache_deco, root_3ddata
+                                temp_cache, mesh_cache_deco, root_3ddata,
+                                block_x=block_x, block_y=block_y,
+                                ifo_block_type="DECO", ifo_index=obj_index
                             )
                             total_deco += 1
             
@@ -1083,7 +1104,8 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         self.report({'INFO'}, f"Import completed in {elapsed:.2f} seconds")
         return {"FINISHED"}
     
-    def spawn_object(self, context, collection, zsc, ifo_object, material_cache, mesh_cache, base_path):
+    def spawn_object(self, context, collection, zsc, ifo_object, material_cache, mesh_cache, base_path,
+                     block_x=None, block_y=None, ifo_block_type=None, ifo_index=None):
         """Spawn a ZSC object from IFO data with correct coordinate conversion"""
         zsc_obj = zsc.objects[ifo_object.object_id]
         
@@ -1093,6 +1115,18 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         parent_empty.empty_display_type = 'PLAIN_AXES'
         parent_empty.empty_display_size = 0.5
         collection.objects.link(parent_empty)
+
+        # --- Round-trip metadata (used by the zone exporter) ---
+        # Identifies which IFO file + block + object index this instance
+        # came from, so save() can update the right record.
+        if block_x is not None:
+            parent_empty["rose_block_x"] = int(block_x)
+            parent_empty["rose_block_y"] = int(block_y)
+            parent_empty["rose_ifo_block"] = ifo_block_type
+            parent_empty["rose_ifo_index"] = int(ifo_index)
+            parent_empty["rose_zsc_object_id"] = int(ifo_object.object_id)
+            parent_empty["rose_zsc_path"] = zsc.filepath
+            parent_empty["rose_ifo_object_name"] = ifo_object.object_name
         
         # --- Transform Conversion (Rose -> Blender) ---
         # Both Rose and Blender use Z-up coordinate systems
@@ -1106,8 +1140,12 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         
         # Convert rotation from IFO (XYZW order) to Blender (WXYZ order)
         # Both Z-up, only negate Y component: (w, x, y, z) -> (w, x, -y, z)
+        # NOTE: rotation_mode must be set BEFORE assigning
+        # rotation_quaternion - in Euler mode the assignment is a no-op
+        # for the actual transform in Blender 4.x.
         from mathutils import Quaternion
         rot = ifo_object.rotation
+        parent_empty.rotation_mode = 'QUATERNION'
         parent_empty.rotation_quaternion = Quaternion((rot.w, rot.x, -rot.y, rot.z))
         
         # Scale: no axis swap needed since both use Z-up

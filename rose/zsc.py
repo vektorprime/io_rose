@@ -144,6 +144,8 @@ class Zsc:
         self.materials: List[ZscMaterial] = []
         self.effects: List[str] = []
         self.objects: List[ZscObject] = []
+        self.raw: bytes = None          # original file bytes (for lossless save)
+        self._section_offsets = None    # (meshes, materials, effects, objects) byte ranges
         self.load(filepath)
 
     def __repr__(self):
@@ -154,6 +156,10 @@ class Zsc:
         zsc_size = os.path.getsize(filepath)
         try:
             with open(filepath, "rb") as f:
+                self.raw = f.read()
+                f.seek(0)
+
+                section_ranges = {}
                 def read_u32():
                     val = f.read(4)
                     if len(val) != 4:
@@ -203,9 +209,13 @@ class Zsc:
                 # --- Meshes ---
                 mesh_count = read_u16()
                 self.meshes = []
+                self.materials = []
+                self.effects = []
+                self.objects = []
                 for _ in range(mesh_count):
                     path = read_str()
                     self.meshes.append(path)
+                section_ranges['meshes'] = (0, f.tell())
 
                 # --- Materials ---
                 material_count = read_u16()
@@ -243,6 +253,7 @@ class Zsc:
                         mat.alpha_test = None
 
                     self.materials.append(mat)
+                section_ranges['materials'] = (section_ranges['meshes'][1], f.tell())
 
                 # --- Effects ---
                 effect_count = read_u16()
@@ -250,6 +261,7 @@ class Zsc:
                 for _ in range(effect_count):
                     path = read_str()
                     self.effects.append(path)
+                section_ranges['effects'] = (section_ranges['materials'][1], f.tell())
 
                 # --- Objects ---
                 object_count = read_u16()
@@ -356,7 +368,197 @@ class Zsc:
 
                     self.objects.append(obj)
 
+                section_ranges['objects'] = (section_ranges['effects'][1], f.tell())
+                self._section_offsets = section_ranges
+
 
         except Exception as e:
             offset = f.tell() if 'f' in locals() else 0
             raise RuntimeError(f"Failed to load ZSC file '{filepath}' at offset {offset}: {e}")
+
+    # ------------------------------------------------------------------
+    # Serialization
+    #
+    # The existing sections (meshes / materials / effects / objects) are
+    # re-emitted byte-for-byte from the original file, so a save never
+    # corrupts data the parser couldn't round-trip. Appended meshes,
+    # materials and objects are serialized after the originals - because
+    # mesh/material/object ids are positional indices, append-only
+    # insertion keeps every existing id valid.
+    # ------------------------------------------------------------------
+
+    def append_mesh(self, path: str):
+        self.meshes.append(path)
+
+    def append_material(self, mat: ZscMaterial):
+        self.materials.append(mat)
+
+    def append_object(self, obj: ZscObject):
+        self.objects.append(obj)
+
+    @staticmethod
+    def _write_cstr(buf, s):
+        buf.extend(s.encode('utf-8'))
+        buf.append(0)
+
+    @staticmethod
+    def _write_vec3(buf, v):
+        buf.extend(struct.pack('<fff', v[0], v[1], v[2]))
+
+    @staticmethod
+    def _write_quat(buf, q):
+        buf.extend(struct.pack('<ffff', q[3], q[0], q[1], q[2]))  # WXYZ
+
+    @staticmethod
+    def _write_prop_vec3(buf, prop_id, v):
+        buf.append(prop_id)
+        buf.append(12)
+        Zsc._write_vec3(buf, v)
+
+    @staticmethod
+    def _write_prop_quat(buf, v):
+        buf.append(2)
+        buf.append(16)
+        Zsc._write_quat(buf, v)
+
+    @staticmethod
+    def _write_prop_u16(buf, prop_id, v):
+        buf.append(prop_id)
+        buf.append(2)
+        buf.extend(struct.pack('<H', v))
+
+    def _write_part(self, buf, part: ZscObjectPart):
+        buf.extend(struct.pack('<HH', part.mesh_id, part.material_id))
+        Zsc._write_prop_vec3(buf, 1, part.position)
+        Zsc._write_prop_quat(buf, part.rotation)
+        Zsc._write_prop_vec3(buf, 3, part.scale)
+        if part.bone_index is not None:
+            Zsc._write_prop_u16(buf, 5, part.bone_index)
+        if part.dummy_index is not None:
+            Zsc._write_prop_u16(buf, 6, part.dummy_index)
+        if part.parent is not None:
+            Zsc._write_prop_u16(buf, 7, part.parent + 1)
+        if part.collision_shape is not None:
+            bits = int(part.collision_shape) | part.collision_flags
+            Zsc._write_prop_u16(buf, 29, bits)
+        if part.animation_path:
+            data = part.animation_path.encode('utf-8')
+            buf.append(30)
+            buf.append(len(data))
+            buf.extend(data)
+        buf.append(0)  # end of properties
+
+    def _write_effect(self, buf, eff: ZscObjectEffect):
+        buf.extend(struct.pack('<HH', eff.effect_id, int(eff.effect_type)))
+        Zsc._write_prop_vec3(buf, 1, eff.position)
+        Zsc._write_prop_quat(buf, eff.rotation)
+        Zsc._write_prop_vec3(buf, 3, eff.scale)
+        if eff.parent is not None:
+            Zsc._write_prop_u16(buf, 7, eff.parent + 1)
+        buf.append(0)
+
+    def _write_object(self, buf, obj: ZscObject):
+        buf.extend(b'\x00' * 12)  # reserved (name buffer, skipped on read)
+        buf.extend(struct.pack('<H', len(obj.parts)))
+        if len(obj.parts) == 0:
+            return
+        for part in obj.parts:
+            self._write_part(buf, part)
+        buf.extend(struct.pack('<H', len(obj.effects)))
+        for eff in obj.effects:
+            self._write_effect(buf, eff)
+        buf.extend(b'\x00' * 24)  # reserved (skipped on read)
+
+    def _write_new_mesh_section(self, buf):
+        for path in self.meshes[self._original_count('meshes'):]:
+            Zsc._write_cstr(buf, path)
+
+    def _write_new_material_section(self, buf):
+        for mat in self.materials[self._original_count('materials'):]:
+            Zsc._write_cstr(buf, mat.path)
+            buf.extend(struct.pack('<HHHHHHHHHHH',
+                                   1 if mat.is_skin else 0,
+                                   1 if mat.alpha_enabled else 0,
+                                   1 if mat.two_sided else 0,
+                                   1 if mat.alpha_test is not None else 0,
+                                   int((mat.alpha_test or 0.0) * 256.0),
+                                   1 if mat.z_test_enabled else 0,
+                                   1 if mat.z_write_enabled else 0,
+                                   1 if mat.blend_mode == BlendMode.LIGHTEN else 0,
+                                   1 if mat.specular_enabled else 0,
+                                   int(mat.glow) if mat.glow is not None else 0,
+                                   0))
+            buf.extend(struct.pack('<f', mat.alpha))
+            Zsc._write_vec3(buf, mat.glow_color)
+
+    def _write_new_effect_section(self, buf):
+        for path in self.effects[self._original_count('effects'):]:
+            Zsc._write_cstr(buf, path)
+
+    def _write_new_object_section(self, buf):
+        for obj in self.objects[self._original_count('objects'):]:
+            self._write_object(buf, obj)
+
+    def _original_count(self, section):
+        """Number of items in a section that came from the original file."""
+        if not self._section_offsets or not self.raw:
+            return 0
+        if section == 'meshes':
+            return len(self.meshes) - self._appended('meshes')
+        if section == 'materials':
+            return len(self.materials) - self._appended('materials')
+        if section == 'effects':
+            return len(self.effects) - self._appended('effects')
+        if section == 'objects':
+            return len(self.objects) - self._appended('objects')
+        return 0
+
+    def _appended(self, section):
+        start, end = self._section_offsets[section]
+        raw_count_field = self.raw[start:start + 2]
+        if len(raw_count_field) == 2:
+            count = int.from_bytes(raw_count_field, 'little')
+            current = {'meshes': len(self.meshes), 'materials': len(self.materials),
+                       'effects': len(self.effects), 'objects': len(self.objects)}[section]
+            return max(0, current - count)
+        return 0
+
+    def save(self, filepath: str):
+        """Write the ZSC file: original sections re-emitted byte-for-byte,
+        appended items serialized after them."""
+        if not self.raw or not self._section_offsets:
+            raise RuntimeError("Zsc was not loaded from a file; cannot save losslessly")
+
+        m0, m1 = self._section_offsets['meshes']
+        ma0, ma1 = self._section_offsets['materials']
+        e0, e1 = self._section_offsets['effects']
+        o0, o1 = self._section_offsets['objects']
+
+        with open(filepath, "wb") as f:
+            f.write(struct.pack('<H', len(self.meshes)))
+            f.write(self.raw[m0 + 2:m1])
+            extra = bytearray()
+            self._write_new_mesh_section(extra)
+            f.write(extra)
+
+            f.write(struct.pack('<H', len(self.materials)))
+            f.write(self.raw[ma0 + 2:ma1])
+            extra = bytearray()
+            self._write_new_material_section(extra)
+            f.write(extra)
+
+            f.write(struct.pack('<H', len(self.effects)))
+            f.write(self.raw[e0 + 2:e1])
+            extra = bytearray()
+            self._write_new_effect_section(extra)
+            f.write(extra)
+
+            f.write(struct.pack('<H', len(self.objects)))
+            f.write(self.raw[o0 + 2:o1])
+            extra = bytearray()
+            self._write_new_object_section(extra)
+            f.write(extra)
+
+        # Re-parse the file so raw bytes and section offsets stay in sync
+        # for subsequent saves.
+        self.load(filepath)

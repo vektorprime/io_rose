@@ -12,6 +12,139 @@ from bpy.props import StringProperty, BoolProperty, EnumProperty
 from bpy_extras.io_utils import ExportHelper
 
 
+def export_zms_mesh_object(obj, filepath, version=8, export_normals=True,
+                           export_colors=True, export_uv=True, report=None):
+    """Export a Blender mesh object to a ZMS file (shared by the manual
+    export operator and the zone exporter).
+
+    Args:
+        obj: the Blender mesh object to export
+        filepath: destination .ZMS path
+        version: ZMS version (5-8)
+        report: optional callable(level, message) for progress messages
+
+    Returns:
+        None on success, or an error string on failure.
+    """
+    if report is None:
+        report = lambda level, msg: None
+    # report callbacks take a string level ('INFO'/'ERROR'); wrap into the
+    # set form bpy operator reports expect.
+    raw_report = report
+    report = lambda level, msg: raw_report({level}, msg)
+
+    filepath = Path(filepath)
+
+    if obj is None or obj.type != 'MESH':
+        return "No mesh object selected"
+
+    mesh = obj.data
+
+    # Try to detect version from imported metadata
+    if "zms_version" in obj:
+        try:
+            version = int(obj["zms_version"])
+        except Exception:
+            pass
+
+    # C++ uses uint16 for num_verts, num_faces in memory
+    # Version 5/6 file format uses uint32 for counts
+    # Version 7/8 file format uses uint16 for counts (matches C++ memory)
+    if len(mesh.vertices) > 65535:
+        return f"Mesh has {len(mesh.vertices)} vertices. C++ uses uint16 (max 65,535)."
+
+    mesh.calc_loop_triangles()
+    if len(mesh.loop_triangles) > 65535:
+        return f"Mesh has {len(mesh.loop_triangles)} triangles. C++ uses uint16 (max 65,535)."
+
+    # Apply all transformations before export
+    import bmesh
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bmesh.ops.transform(bm, matrix=obj.matrix_world, verts=bm.verts)
+
+    # Create a temporary mesh with transformations applied
+    temp_mesh = bpy.data.meshes.new("temp_export")
+    bm.to_mesh(temp_mesh)
+    bm.free()
+    temp_mesh.calc_loop_triangles()
+
+    # Restore ZMS metadata from the original object (if available)
+    orig_materials = None
+    orig_strips = None
+    orig_pool = None
+    orig_bones = None
+
+    if "zms_materials" in obj:
+        try:
+            orig_materials = ast.literal_eval(obj["zms_materials"])
+        except Exception:
+            orig_materials = None
+
+    if "zms_strips" in obj:
+        try:
+            orig_strips = ast.literal_eval(obj["zms_strips"])
+        except Exception:
+            orig_strips = None
+
+    if "zms_pool" in obj:
+        try:
+            orig_pool = obj["zms_pool"]
+        except Exception:
+            orig_pool = None
+
+    if "zms_bones" in obj:
+        try:
+            orig_bones = ast.literal_eval(obj["zms_bones"])
+        except Exception:
+            orig_bones = None
+
+    # Create ZMS from mesh. The operator class cannot be instantiated
+    # (bpy_struct), so the methods are called with None as self - they only
+    # use getattr-based defaults and the explicit parameters.
+    zms = ExportZMS.zms_from_mesh_data(None, temp_mesh, obj, orig_bones, version,
+                                       export_normals=export_normals,
+                                       export_colors=export_colors,
+                                       export_uv=export_uv,
+                                       report=report)
+
+    # Clean up temp mesh
+    bpy.data.meshes.remove(temp_mesh)
+
+    if zms is None:
+        return "ZMS creation failed"
+
+    # Apply restored metadata
+    if orig_materials is not None:
+        zms.materials = orig_materials
+    if orig_strips is not None:
+        zms.strips = orig_strips
+    if orig_pool is not None:
+        zms.pool = orig_pool
+    if orig_bones is not None:
+        zms.bones = orig_bones
+
+    # Final validation - C++ uses uint16 for everything in memory
+    if len(zms.vertices) > 65535:
+        return f"After processing: {len(zms.vertices)} vertices (max 65,535). Mesh has UV seams that split vertices."
+
+    # Validate indices don't exceed vertex count
+    max_idx = 0
+    for idx in zms.indices:
+        max_idx = max(max_idx, int(idx.x), int(idx.y), int(idx.z))
+    if max_idx >= len(zms.vertices):
+        return f"Face indices reference vertices that don't exist! Max index: {max_idx}, Vertex count: {len(zms.vertices)}"
+
+    try:
+        with open(str(filepath), "wb") as f:
+            ExportZMS.write_zms(f, zms)
+    except Exception as e:
+        return f"Failed to write ZMS file: {str(e)}"
+
+    report('INFO', f"Exported {filepath.name} (v{zms.version}, {len(zms.vertices)} verts, {len(zms.indices)} tris)")
+    return None
+
+
 class ExportZMS(bpy.types.Operator, ExportHelper):
     bl_idname = "rose.export_zms"
     bl_label = "Export ROSE Mesh (.zms)"
@@ -51,147 +184,35 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
     )
 
     def execute(self, context):
-        filepath = Path(self.filepath)
-        obj = context.active_object
-        
-        if obj is None or obj.type != 'MESH':
-            self.report({'ERROR'}, "No mesh object selected")
+        error = export_zms_mesh_object(
+            context.active_object,
+            self.filepath,
+            version=self.export_version,
+            export_normals=self.export_normals,
+            export_colors=self.export_colors,
+            export_uv=self.export_uv,
+            report=self.report,
+        )
+        if error:
+            self.report({'ERROR'}, error)
             return {'CANCELLED'}
-        
-        # Check mesh size limits
-        mesh = obj.data
-        
-        # Try to detect version from imported metadata
-        version = self.export_version
-        if "zms_version" in obj:
-            try:
-                version = int(obj["zms_version"])
-            except:
-                pass
-        
-        # C++ uses uint16 for num_verts, num_faces in memory
-        # Version 5/6 file format uses uint32 for counts
-        # Version 7/8 file format uses uint16 for counts (matches C++ memory)
-        if len(mesh.vertices) > 65535:
-            self.report({'ERROR'}, f"Mesh has {len(mesh.vertices)} vertices. C++ uses uint16 (max 65,535).")
-            return {'CANCELLED'}
-        
-        mesh.calc_loop_triangles()
-        if len(mesh.loop_triangles) > 65535:
-            self.report({'ERROR'}, f"Mesh has {len(mesh.loop_triangles)} triangles. C++ uses uint16 (max 65,535).")
-            return {'CANCELLED'}
-        
-        # Apply all transformations before export
-        import bmesh
-        bm = bmesh.new()
-        bm.from_mesh(mesh)
-        bmesh.ops.transform(bm, matrix=obj.matrix_world, verts=bm.verts)
-        
-        # Create a temporary mesh with transformations applied
-        temp_mesh = bpy.data.meshes.new("temp_export")
-        bm.to_mesh(temp_mesh)
-        bm.free()
-        temp_mesh.calc_loop_triangles()
-        
-        # Restore ZMS metadata from the original object (if available)
-        orig_materials = None
-        orig_strips = None
-        orig_pool = None
-        orig_bones = None
-
-        if "zms_materials" in obj:
-            try:
-                orig_materials = ast.literal_eval(obj["zms_materials"])
-            except Exception:
-                orig_materials = None
-
-        if "zms_strips" in obj:
-            try:
-                orig_strips = ast.literal_eval(obj["zms_strips"])
-            except Exception:
-                orig_strips = None
-
-        if "zms_pool" in obj:
-            try:
-                orig_pool = obj["zms_pool"]
-            except Exception:
-                orig_pool = None
-
-        if "zms_bones" in obj:
-            try:
-                orig_bones = ast.literal_eval(obj["zms_bones"])
-            except Exception:
-                orig_bones = None
-
-        # Create ZMS from mesh
-        zms = self.zms_from_mesh_data(temp_mesh, obj, orig_bones, version)
-        
-        # Clean up temp mesh
-        bpy.data.meshes.remove(temp_mesh)
-        
-        # Check if zms creation failed
-        if zms is None:
-            return {'CANCELLED'}
-        
-        # Apply restored metadata
-        if orig_materials is not None:
-            zms.materials = orig_materials
-        if orig_strips is not None:
-            zms.strips = orig_strips
-        if orig_pool is not None:
-            zms.pool = orig_pool
-        if orig_bones is not None:
-            zms.bones = orig_bones
-        
-        # Final validation - C++ uses uint16 for everything in memory
-        if len(zms.vertices) > 65535:
-            self.report({'ERROR'}, f"After processing: {len(zms.vertices)} vertices (max 65,535). Mesh has UV seams that split vertices.")
-            return {'CANCELLED'}
-        
-        # Debug logging
-        self.report({'INFO'}, f"=== ZMS Export Debug ===")
-        self.report({'INFO'}, f"Identifier: {zms.identifier}")
-        self.report({'INFO'}, f"Version: {zms.version}")
-        self.report({'INFO'}, f"Flags: {zms.flags}")
-        self.report({'INFO'}, f"Vertices: {len(zms.vertices)}")
-        self.report({'INFO'}, f"Indices: {len(zms.indices)}")
-        self.report({'INFO'}, f"Bones: {zms.bones}")
-        self.report({'INFO'}, f"Materials: {zms.materials}")
-        self.report({'INFO'}, f"Strips: {zms.strips}")
-        self.report({'INFO'}, f"Pool: {zms.pool}")
-        self.report({'INFO'}, f"Bounding Box Min: ({zms.bounding_box_min.x}, {zms.bounding_box_min.y}, {zms.bounding_box_min.z})")
-        self.report({'INFO'}, f"Bounding Box Max: ({zms.bounding_box_max.x}, {zms.bounding_box_max.y}, {zms.bounding_box_max.z})")
-        
-        # Validate indices don't exceed vertex count
-        max_idx = 0
-        for idx in zms.indices:
-            max_idx = max(max_idx, int(idx.x), int(idx.y), int(idx.z))
-        self.report({'INFO'}, f"Max face index: {max_idx} (should be < {len(zms.vertices)})")
-        
-        if max_idx >= len(zms.vertices):
-            self.report({'ERROR'}, f"Face indices reference vertices that don't exist! Max index: {max_idx}, Vertex count: {len(zms.vertices)}")
-            return {'CANCELLED'}
-        
-        self.report({'INFO'}, f"=======================")
-        
-        # Write to file
-        try:
-            with open(str(filepath), "wb") as f:
-                self.write_zms(f, zms)
-        except Exception as e:
-            self.report({'ERROR'}, f"Failed to write ZMS file: {str(e)}")
-            return {'CANCELLED'}
-        
-        self.report({'INFO'}, f"Exported {filepath.name} (v{zms.version}, {len(zms.vertices)} verts, {len(zms.indices)} tris)")
         return {"FINISHED"}
     
-    def zms_from_mesh_data(self, mesh, obj=None, orig_bones=None, version=8):
+    def zms_from_mesh_data(self, mesh, obj=None, orig_bones=None, version=8,
+                           export_normals=None, export_colors=None, export_uv=None,
+                           report=None):
         """Extract ZMS data from mesh data"""
         # Create a report function wrapper
-        def report_wrapper(level, message):
-            self.report({level}, message)
-        
-        zms = ZMS(report_func=report_wrapper)
+        if report is None:
+            report = lambda level, message: (self.report({level}, message)
+                                             if hasattr(self, 'report') else None)
+        if export_normals is None:
+            export_normals = getattr(self, 'export_normals', True)
+        if export_colors is None:
+            export_colors = getattr(self, 'export_colors', True)
+        if export_uv is None:
+            export_uv = getattr(self, 'export_uv', True)
+        zms = ZMS(report_func=report)
         zms.version = version
         
         if version == 5:
@@ -212,13 +233,13 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
         # Calculate flags (int vertex_format)
         zms.flags = VertexFlags.POSITION
 
-        if self.export_normals and len(mesh.vertices) > 0:
+        if export_normals and len(mesh.vertices) > 0:
             zms.flags |= VertexFlags.NORMAL
 
-        if self.export_colors and len(mesh.vertex_colors) > 0:
+        if export_colors and len(mesh.vertex_colors) > 0:
             zms.flags |= VertexFlags.COLOR
 
-        if self.export_uv:
+        if export_uv:
             if len(mesh.uv_layers) >= 1 and len(mesh.uv_layers[0].data) > 0:
                 zms.flags |= VertexFlags.UV1
             if len(mesh.uv_layers) >= 2 and len(mesh.uv_layers[1].data) > 0:
@@ -260,7 +281,7 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
                         uv = mesh.uv_layers[uv_idx].data[loop_idx].uv
                         uv_key.extend([round(uv[0], 6), round(uv[1], 6)])
                 
-                if self.export_colors and len(mesh.vertex_colors) > 0:
+                if export_colors and len(mesh.vertex_colors) > 0:
                     color_layer = mesh.vertex_colors[0]
                     if loop_idx < len(color_layer.data):
                         color = color_layer.data[loop_idx].color
@@ -270,7 +291,7 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
                 
                 # CRITICAL CHECK: Ensure we don't exceed uint16 max for indices
                 if len(zms.vertices) >= 65535:
-                    self.report({'ERROR'}, f"Vertex count would exceed 65,535 after UV splitting. Current: {len(zms.vertices)}. Reduce subdivision or use fewer UV seams.")
+                    report({'ERROR'}, f"Vertex count would exceed 65,535 after UV splitting. Current: {len(zms.vertices)}. Reduce subdivision or use fewer UV seams.")
                     return None
                 
                 if key not in vertex_map:
@@ -374,7 +395,8 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
         
         return zms
 
-    def write_zms(self, f, zms):
+    @staticmethod
+    def write_zms(f, zms):
         version = zms.version
         
         # Write identifier (null-terminated string)
@@ -384,15 +406,16 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
         f.write(struct.pack("<I", zms.flags))
         
         # Write bounding box (vec3 - 3x float)
-        self.write_vector3_f32(f, zms.bounding_box_min)
-        self.write_vector3_f32(f, zms.bounding_box_max)
+        ExportZMS.write_vector3_f32(f, zms.bounding_box_min)
+        ExportZMS.write_vector3_f32(f, zms.bounding_box_max)
         
         if version <= 6:
-            self._write_version6(f, zms, version)
+            ExportZMS._write_version6(f, zms, version)
         else:
-            self._write_version8(f, zms, version)
+            ExportZMS._write_version8(f, zms, version)
     
-    def _write_version6(self, f, zms, version):
+    @staticmethod
+    def _write_version6(f, zms, version):
         """Write ZMS version 5 or 6 format
         
         File format uses uint32 for counts/indices
@@ -415,17 +438,17 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
         if zms.positions_enabled():
             for i, v in enumerate(zms.vertices):
                 f.write(struct.pack("<I", i))  # vertex_id (uint32)
-                self.write_vector3_f32(f, v.position)  # vec3 (3x float)
+                ExportZMS.write_vector3_f32(f, v.position)  # vec3 (3x float)
         
         if zms.normals_enabled():
             for i, v in enumerate(zms.vertices):
                 f.write(struct.pack("<I", i))
-                self.write_vector3_f32(f, v.normal)  # vec3
+                ExportZMS.write_vector3_f32(f, v.normal)  # vec3
         
         if zms.colors_enabled():
             for i, v in enumerate(zms.vertices):
                 f.write(struct.pack("<I", i))
-                self.write_color4(f, v.color)  # zz_color (4x float)
+                ExportZMS.write_color4(f, v.color)  # zz_color (4x float)
         
         if zms.bones_enabled():
             for i, v in enumerate(zms.vertices):
@@ -444,27 +467,27 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
         if zms.tangents_enabled():
             for i, v in enumerate(zms.vertices):
                 f.write(struct.pack("<I", i))
-                self.write_vector3_f32(f, v.tangent)  # vec3
+                ExportZMS.write_vector3_f32(f, v.tangent)  # vec3
         
         if zms.uv1_enabled():
             for i, v in enumerate(zms.vertices):
                 f.write(struct.pack("<I", i))
-                self.write_vector2_f32(f, v.uv1)  # vec2
+                ExportZMS.write_vector2_f32(f, v.uv1)  # vec2
         
         if zms.uv2_enabled():
             for i, v in enumerate(zms.vertices):
                 f.write(struct.pack("<I", i))
-                self.write_vector2_f32(f, v.uv2)
+                ExportZMS.write_vector2_f32(f, v.uv2)
         
         if zms.uv3_enabled():
             for i, v in enumerate(zms.vertices):
                 f.write(struct.pack("<I", i))
-                self.write_vector2_f32(f, v.uv3)
+                ExportZMS.write_vector2_f32(f, v.uv3)
         
         if zms.uv4_enabled():
             for i, v in enumerate(zms.vertices):
                 f.write(struct.pack("<I", i))
-                self.write_vector2_f32(f, v.uv4)
+                ExportZMS.write_vector2_f32(f, v.uv4)
         
         # Write triangle indices (usvec3 stored as uint32 in file, uint16 in C++)
         f.write(struct.pack("<I", len(zms.indices)))  # uint32 num_faces in file
@@ -481,7 +504,8 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
                 f.write(struct.pack("<I", i))  # index (uint32)
                 f.write(struct.pack("<I", mat))  # uint32 in file (uint16 in C++)
     
-    def _write_version8(self, f, zms, version):
+    @staticmethod
+    def _write_version8(f, zms, version):
         """Write ZMS version 7 or 8 format
         
         File format matches C++ memory: uint16 for counts and indices
@@ -498,15 +522,15 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
         # Write vertex data (no vertex_id prefix)
         if zms.positions_enabled():
             for v in zms.vertices:
-                self.write_vector3_f32(f, v.position)  # vec3
+                ExportZMS.write_vector3_f32(f, v.position)  # vec3
         
         if zms.normals_enabled():
             for v in zms.vertices:
-                self.write_vector3_f32(f, v.normal)  # vec3
+                ExportZMS.write_vector3_f32(f, v.normal)  # vec3
         
         if zms.colors_enabled():
             for v in zms.vertices:
-                self.write_color4(f, v.color)  # zz_color (4x float)
+                ExportZMS.write_color4(f, v.color)  # zz_color (4x float)
         
         if zms.bones_enabled():
             for v in zms.vertices:
@@ -523,23 +547,23 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
         
         if zms.tangents_enabled():
             for v in zms.vertices:
-                self.write_vector3_f32(f, v.tangent)  # vec3
+                ExportZMS.write_vector3_f32(f, v.tangent)  # vec3
         
         if zms.uv1_enabled():
             for v in zms.vertices:
-                self.write_vector2_f32(f, v.uv1)  # vec2
+                ExportZMS.write_vector2_f32(f, v.uv1)  # vec2
         
         if zms.uv2_enabled():
             for v in zms.vertices:
-                self.write_vector2_f32(f, v.uv2)
+                ExportZMS.write_vector2_f32(f, v.uv2)
         
         if zms.uv3_enabled():
             for v in zms.vertices:
-                self.write_vector2_f32(f, v.uv3)
+                ExportZMS.write_vector2_f32(f, v.uv3)
         
         if zms.uv4_enabled():
             for v in zms.vertices:
-                self.write_vector2_f32(f, v.uv4)
+                ExportZMS.write_vector2_f32(f, v.uv4)
         
         # Write indices (flat array) - usvec3 = 3x uint16
         f.write(struct.pack("<H", len(zms.indices)))  # uint16 num_faces
@@ -562,16 +586,19 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
         if version >= 8:
             f.write(struct.pack("<H", zms.pool))  # uint16
     
-    def write_vector2_f32(self, f, vec):
+    @staticmethod
+    def write_vector2_f32(f, vec):
         f.write(struct.pack("<f", vec.x))
         f.write(struct.pack("<f", vec.y))
     
-    def write_vector3_f32(self, f, vec):
+    @staticmethod
+    def write_vector3_f32(f, vec):
         f.write(struct.pack("<f", vec.x))
         f.write(struct.pack("<f", vec.y))
         f.write(struct.pack("<f", vec.z))
     
-    def write_color4(self, f, color):
+    @staticmethod
+    def write_color4(f, color):
         f.write(struct.pack("<f", color.r))
         f.write(struct.pack("<f", color.g))
         f.write(struct.pack("<f", color.b))
