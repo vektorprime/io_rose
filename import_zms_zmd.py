@@ -186,7 +186,12 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
         return obj
     
     def _bones_from_zmd(self, zmd, armature):
-        """Create Blender bones from ZMD bone data."""
+        """Create Blender bones from ZMD bone data.
+
+        Note: a Blender bone only stores direction + roll (5 DOF) while ZMD
+        gives a full 3-DOF rotation, so placing the tail along the rest Y axis
+        fixes 2 of the 3.  The remaining roll is set in _align_rest_to_zmd.
+        """
         # Create all bones first
         for rose_bone in zmd.bones:
             bone = armature.edit_bones.new(rose_bone.name)
@@ -239,6 +244,11 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
         matrix_local after the first pass gives that actual base frame, so the
         required roll is the signed angle around the bone's Y axis from the
         base X axis to the ZMD rest X axis.
+
+        This alignment is critical and its failure is silent: Blender deforms
+        skinned meshes with pose @ rest^-1 while the engine uses
+        pose @ ZMD_bind^-1.  A mismatched rest still looks correct at rest
+        (the ratio is identity for ANY rest) but corrupts every animated pose.
         """
         world_positions = []
         world_rotations = []
@@ -407,9 +417,10 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
                         continue
                     
                     if weight and weight > 0.0:
-                        # bone_indices are global ZMD bone ids (empirically they
-                        # can exceed len(zms.bones)), so map straight to the
-                        # armature bone name.
+                        # bone_indices are GLOBAL ZMD bone ids: real files
+                        # contain indices beyond len(zms.bones), so they cannot
+                        # be local table slots (rose-file-readers' zms.rs
+                        # bones.get(index) interpretation is wrong for these).
                         if 0 <= bone_id < len(bone_names):
                             group_name = bone_names[bone_id]
                         else:
