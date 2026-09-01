@@ -13,7 +13,8 @@ from bpy_extras.io_utils import ExportHelper
 
 
 def export_zms_mesh_object(obj, filepath, version=8, export_normals=True,
-                           export_colors=True, export_uv=True, report=None):
+                           export_colors=True, export_uv=True, report=None,
+                           apply_world_transform=True, convert_coordinates=True):
     """Export a Blender mesh object to a ZMS file (shared by the manual
     export operator and the zone exporter).
 
@@ -32,6 +33,12 @@ def export_zms_mesh_object(obj, filepath, version=8, export_normals=True,
     # set form bpy operator reports expect.
     raw_report = report
     report = lambda level, msg: raw_report({level}, msg)
+
+    # The operator's enum property passes a string identifier
+    try:
+        version = int(version)
+    except (TypeError, ValueError):
+        version = 8
 
     filepath = Path(filepath)
 
@@ -57,11 +64,13 @@ def export_zms_mesh_object(obj, filepath, version=8, export_normals=True,
     if len(mesh.loop_triangles) > 65535:
         return f"Mesh has {len(mesh.loop_triangles)} triangles. C++ uses uint16 (max 65,535)."
 
-    # Apply all transformations before export
+    # Apply all transformations before export (only for world-space meshes;
+    # imported ROSE meshes are kept in local space for a faithful round trip)
     import bmesh
     bm = bmesh.new()
     bm.from_mesh(mesh)
-    bmesh.ops.transform(bm, matrix=obj.matrix_world, verts=bm.verts)
+    if apply_world_transform:
+        bmesh.ops.transform(bm, matrix=obj.matrix_world, verts=bm.verts)
 
     # Create a temporary mesh with transformations applied
     temp_mesh = bpy.data.meshes.new("temp_export")
@@ -106,6 +115,7 @@ def export_zms_mesh_object(obj, filepath, version=8, export_normals=True,
                                        export_normals=export_normals,
                                        export_colors=export_colors,
                                        export_uv=export_uv,
+                                       convert_coordinates=convert_coordinates,
                                        report=report)
 
     # Clean up temp mesh
@@ -151,9 +161,9 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
     bl_options = {"PRESET"}
 
     filename_ext = ".ZMS"
-    filter_glob = StringProperty(default="*.ZMS", options={"HIDDEN"})
-    
-    export_version = EnumProperty(
+    filter_glob: StringProperty(default="*.ZMS", options={"HIDDEN"})
+
+    export_version: EnumProperty(
         name="ZMS Version",
         description="Choose ZMS file version to export",
         items=[
@@ -165,19 +175,19 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
         default='8',
     )
     
-    export_normals = BoolProperty(
+    export_normals: BoolProperty(
         name="Export Normals",
         description="Export vertex normals",
         default=True,
     )
     
-    export_colors = BoolProperty(
+    export_colors: BoolProperty(
         name="Export Vertex Colors",
         description="Export vertex colors if available",
         default=True,
     )
     
-    export_uv = BoolProperty(
+    export_uv: BoolProperty(
         name="Export UV Coordinates",
         description="Export UV coordinates",
         default=True,
@@ -192,6 +202,8 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
             export_colors=self.export_colors,
             export_uv=self.export_uv,
             report=self.report,
+            apply_world_transform=False,
+            convert_coordinates=False,
         )
         if error:
             self.report({'ERROR'}, error)
@@ -200,7 +212,7 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
     
     def zms_from_mesh_data(self, mesh, obj=None, orig_bones=None, version=8,
                            export_normals=None, export_colors=None, export_uv=None,
-                           report=None):
+                           convert_coordinates=True, report=None):
         """Extract ZMS data from mesh data"""
         # Create a report function wrapper
         if report is None:
@@ -296,9 +308,13 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
                 
                 if key not in vertex_map:
                     v = Vertex()
-                    # vec3 position - apply Blender → Rose coordinate transform
-                    # Both use Z-up, inverse of import transform (x, -y, z) -> (x, -y, z)
-                    v.position = Vector3(vert.co.x, -vert.co.y, vert.co.z)
+                    if convert_coordinates:
+                        # vec3 position - apply Blender → Rose coordinate transform
+                        # Both use Z-up, inverse of import transform (x, -y, z) -> (x, -y, z)
+                        v.position = Vector3(vert.co.x, -vert.co.y, vert.co.z)
+                    else:
+                        # Round-trip: importers read vertices verbatim
+                        v.position = Vector3(vert.co.x, vert.co.y, vert.co.z)
                     
                     # Scale positions for version 5/6 (stored *100 in file)
                     if version <= 6:
@@ -306,10 +322,13 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
                         v.position.y *= 100.0
                         v.position.z *= 100.0
                     
-                    # vec3 normal - apply Blender → Rose coordinate transform
-                    # Both use Z-up, inverse of import transform (x, -y, z) -> (x, -y, z)
                     if zms.normals_enabled():
-                        v.normal = Vector3(vert.normal.x, -vert.normal.y, vert.normal.z)
+                        if convert_coordinates:
+                            # vec3 normal - apply Blender → Rose coordinate transform
+                            # Both use Z-up, inverse of import transform (x, -y, z) -> (x, -y, z)
+                            v.normal = Vector3(vert.normal.x, -vert.normal.y, vert.normal.z)
+                        else:
+                            v.normal = Vector3(vert.normal.x, vert.normal.y, vert.normal.z)
                     
                     # zz_color (4x float)
                     if zms.colors_enabled():

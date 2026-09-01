@@ -18,6 +18,20 @@ if "bpy" in locals():
         importlib.reload(import_converted_terrain)
     if "import_combined_zone" in locals():
         importlib.reload(import_combined_zone)
+    if "import_zsc" in locals():
+        importlib.reload(import_zsc)
+    if "import_zms" in locals():
+        importlib.reload(import_zms)
+    if "import_zmd" in locals():
+        importlib.reload(import_zmd)
+    if "import_zmo" in locals():
+        importlib.reload(import_zmo)
+    if "import_zms_zmd" in locals():
+        importlib.reload(import_zms_zmd)
+    if "export_zms" in locals():
+        importlib.reload(export_zms)
+    if "enhance_wings" in locals():
+        importlib.reload(enhance_wings)
     if "export_zone" in locals():
         importlib.reload(export_zone)
 else:
@@ -29,6 +43,7 @@ else:
     from .import_zms import ImportZMS
     from .export_zms import ExportZMS
     from .import_zsc import ImportZSC
+    from .enhance_wings import EnhanceWings
     from .import_zmo import ImportZMO
     from .import_zms_zmd import ImportZMSwithZMD
     from .export_zone import ExportZone, AddZoneObject, MarkZoneObjectDeleted
@@ -50,6 +65,7 @@ def menu(self, context):
     self.layout.operator(ImportZMS.bl_idname, text=ImportZMS.bl_label)
     self.layout.operator(ImportZMSwithZMD.bl_idname, text=ImportZMSwithZMD.bl_label)
     self.layout.operator(ImportZMO.bl_idname, text=ImportZMO.bl_label)
+    self.layout.operator(EnhanceWings.bl_idname, text="ROSE Wings Enhancer (batch)")
 
 def register():
     bpy.utils.register_class(ImportCombinedZone)
@@ -67,6 +83,7 @@ def register():
     bpy.types.TOPBAR_MT_file_import.append(menu)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
     bpy.utils.register_class(ImportZSC)
+    bpy.utils.register_class(EnhanceWings)
 
 def unregister():
     bpy.utils.unregister_class(ImportCombinedZone)
@@ -83,6 +100,7 @@ def unregister():
     bpy.utils.unregister_class(MarkZoneObjectDeleted)
     bpy.types.TOPBAR_MT_file_import.remove(menu)
     bpy.utils.unregister_class(ImportZSC)
+    bpy.utils.unregister_class(EnhanceWings)
 
 if __name__ == "__main__":
     register()

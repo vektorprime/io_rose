@@ -233,6 +233,13 @@ class ImportZSC(bpy.types.Operator, ImportHelper):
                     if candidate.exists():
                         full_path = candidate
                         break
+                    # Stored paths may include the 3DDATA root as a prefix
+                    parts = Path(mesh_path).parts
+                    if parts and parts[0].upper() == "3DDATA":
+                        candidate = current / Path(*parts[1:])
+                        if candidate.exists():
+                            full_path = candidate
+                            break
                 if current.parent == current:
                     break
                 current = current.parent
@@ -306,12 +313,29 @@ class ImportZSC(bpy.types.Operator, ImportHelper):
             
             links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
             
-            # Handle alpha
-            if zsc_mat.alpha_enabled or zsc_mat.alpha != 1.0:
-                mat.blend_method = 'BLEND'
-                if zsc_mat.alpha != 1.0:
+            # Handle alpha. The game shaders always sample the texture alpha
+            # channel (e.g. wing_material.wgsl / alpha_discard), so wire it
+            # whenever the texture carries one, multiplied by material alpha.
+            has_tex_alpha = tex_node.image is not None and tex_node.image.channels == 4
+            if has_tex_alpha or zsc_mat.alpha_enabled or zsc_mat.alpha != 1.0:
+                if has_tex_alpha and zsc_mat.alpha != 1.0:
+                    mult = nodes.new(type='ShaderNodeMath')
+                    mult.operation = 'MULTIPLY'
+                    mult.location = (-200, -250)
+                    mult.inputs[1].default_value = zsc_mat.alpha
+                    links.new(tex_node.outputs['Alpha'], mult.inputs[0])
+                    links.new(mult.outputs['Value'], bsdf.inputs['Alpha'])
+                elif has_tex_alpha:
                     links.new(tex_node.outputs['Alpha'], bsdf.inputs['Alpha'])
+                else:
                     bsdf.inputs['Alpha'].default_value = zsc_mat.alpha
+                if zsc_mat.alpha_test is not None:
+                    mat.blend_method = 'CLIP'
+                    mat.alpha_threshold = zsc_mat.alpha_test
+                else:
+                    mat.blend_method = 'HASHED'
+                if hasattr(mat, 'show_transparent_back'):
+                    mat.show_transparent_back = False
         
         links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])
         
@@ -333,10 +357,17 @@ class ImportZSC(bpy.types.Operator, ImportHelper):
         current = base_path
         for _ in range(10):
             if current.name.upper() == "3DDATA":
+                parts = Path(texture_path).parts
+                stripped = Path(*parts[1:]) if parts and parts[0].upper() == "3DDATA" else None
                 for ext in self.texture_extensions:
                     candidate = current / Path(texture_path).with_suffix(ext)
                     if candidate.exists():
                         return candidate
+                    # Stored paths may include the 3DDATA root as a prefix
+                    if stripped:
+                        candidate = current / stripped.with_suffix(ext)
+                        if candidate.exists():
+                            return candidate
                 break
             if current.parent == current:
                 break

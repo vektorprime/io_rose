@@ -1299,11 +1299,28 @@ class ImportMap(bpy.types.Operator, ImportHelper):
             
             links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
             
-            if zsc_mat.alpha_enabled or zsc_mat.alpha != 1.0:
-                mat.blend_method = 'BLEND'
-                if zsc_mat.alpha != 1.0:
+            # The game shaders always sample the texture alpha channel, so
+            # wire it whenever the texture carries one, multiplied by material alpha.
+            has_tex_alpha = tex_node.image is not None and tex_node.image.channels == 4
+            if has_tex_alpha or zsc_mat.alpha_enabled or zsc_mat.alpha != 1.0:
+                if has_tex_alpha and zsc_mat.alpha != 1.0:
+                    mult = nodes.new(type='ShaderNodeMath')
+                    mult.operation = 'MULTIPLY'
+                    mult.location = (-200, -250)
+                    mult.inputs[1].default_value = zsc_mat.alpha
+                    links.new(tex_node.outputs['Alpha'], mult.inputs[0])
+                    links.new(mult.outputs['Value'], bsdf.inputs['Alpha'])
+                elif has_tex_alpha:
                     links.new(tex_node.outputs['Alpha'], bsdf.inputs['Alpha'])
+                else:
                     bsdf.inputs['Alpha'].default_value = zsc_mat.alpha
+                if zsc_mat.alpha_test is not None:
+                    mat.blend_method = 'CLIP'
+                    mat.alpha_threshold = zsc_mat.alpha_test
+                else:
+                    mat.blend_method = 'HASHED'
+                if hasattr(mat, 'show_transparent_back'):
+                    mat.show_transparent_back = False
         
         links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])
         

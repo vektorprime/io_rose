@@ -16,8 +16,8 @@ class ImportZMS(bpy.types.Operator, ImportHelper):
     bl_options = {"PRESET"}
 
     filename_ext = ".ZMS"
-    filter_glob = StringProperty(default="*.ZMS", options={"HIDDEN"})
-    load_texture = BoolProperty(
+    filter_glob: StringProperty(default="*.ZMS", options={"HIDDEN"})
+    load_texture: BoolProperty(
         name = "Load texture",
         description = ( "Automatically detect and load a texture if "
                         "one can be found (uses file name)"),
