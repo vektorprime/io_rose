@@ -11,6 +11,7 @@ Coordinate System Notes:
 """
 
 from pathlib import Path
+import math
 import bpy
 import mathutils as bmath
 from bpy.props import StringProperty, BoolProperty
@@ -93,6 +94,10 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
         skeleton_name = zmd_path.stem if zmd_path else "skeleton"
         if zmd:
             armature_obj = self._create_armature(context, zmd, skeleton_name)
+            if armature_obj:
+                # Remember where the skeleton came from so the ZMO importer can
+                # convert ROSE absolute local transforms into Blender pose space
+                armature_obj["zmd_path"] = str(zmd_path)
         
         # Collect all ZMS files to import
         zms_files = []
@@ -173,6 +178,11 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
         
         bpy.ops.object.mode_set(mode='OBJECT')
         
+        # Bone head/tail/roll cannot store an arbitrary rotation frame directly,
+        # so after the first pass (roll=0) compute and apply the exact roll for
+        # each bone so bone.matrix_local equals the ZMD composed rest transform.
+        self._align_rest_to_zmd(zmd, obj)
+        
         return obj
     
     def _bones_from_zmd(self, zmd, armature):
@@ -209,9 +219,9 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
             
             if rose_bone.parent_id == -1:
                 bone.head = world_pos
-                bone.tail = world_pos + bmath.Vector((0, 0, 0.1))
+                bone.tail = world_pos + (world_rot @ bmath.Vector((0, 0.1, 0)))
                 if self.keep_root_bone and bone.length < 0.0001:
-                    bone.tail = bone.head + bmath.Vector((0, 0, 0.1))
+                    bone.tail = bone.head + bmath.Vector((0, 0.1, 0))
             else:
                 if rose_bone.parent_id >= len(armature.edit_bones):
                     continue
@@ -220,6 +230,64 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
                 bone.tail = world_pos + (world_rot @ bmath.Vector((0, 0.1, 0)))
                 if bone.length < 0.001:
                     bone.tail = bone.head + bmath.Vector((0, 0.001, 0))
+
+    def _align_rest_to_zmd(self, zmd, armature_obj):
+        """Set bone roll so matrix_local exactly matches the ZMD rest transform.
+
+        Blender derives a bone's rest frame from head/tail direction plus roll,
+        with an implicit roll=0 base frame.  Reading back the evaluated
+        matrix_local after the first pass gives that actual base frame, so the
+        required roll is the signed angle around the bone's Y axis from the
+        base X axis to the ZMD rest X axis.
+        """
+        world_positions = []
+        world_rotations = []
+        for idx, rose_bone in enumerate(zmd.bones):
+            pos = bmath.Vector(rose_bone.position.as_tuple())
+            rot = bmath.Quaternion(rose_bone.rotation.as_tuple(w_first=True))
+            if rose_bone.parent_id == -1 or rose_bone.parent_id >= len(zmd.bones):
+                world_positions.append(pos)
+                world_rotations.append(rot)
+            else:
+                parent_pos = world_positions[rose_bone.parent_id]
+                parent_rot = world_rotations[rose_bone.parent_id]
+                world_positions.append(parent_pos + (parent_rot @ pos))
+                world_rotations.append(parent_rot @ rot)
+
+        bones = armature_obj.data.bones
+        rolls = {}
+        for idx, rose_bone in enumerate(zmd.bones):
+            bone = bones.get(rose_bone.name)
+            if bone is None:
+                continue
+            if rose_bone.parent_id == -1 or rose_bone.parent_id >= len(zmd.bones):
+                parent_local = bmath.Matrix.Identity(4)
+            else:
+                pb = bones.get(zmd.bones[rose_bone.parent_id].name)
+                parent_local = pb.matrix_local if pb else bmath.Matrix.Identity(4)
+            # Desired local rotation (ZMD), and actual local frame at roll=0
+            desired = parent_local.to_3x3().inverted() @ world_rotations[idx].to_matrix()
+            actual = parent_local.to_3x3().inverted() @ bone.matrix_local.to_3x3()
+            d = actual.col[1].normalized()
+            x0 = actual.col[0].normalized()
+            xt = (desired @ bmath.Vector((1, 0, 0))).normalized()
+            xt = xt - xt.dot(d) * d
+            if xt.length < 1e-6:
+                continue
+            xt.normalize()
+            rolls[idx] = math.atan2(x0.cross(xt).dot(d), x0.dot(xt))
+
+        if not rolls:
+            return
+        bpy.context.view_layer.objects.active = armature_obj
+        bpy.ops.object.mode_set(mode='EDIT')
+        try:
+            for idx, roll in rolls.items():
+                edit_bone = armature_obj.data.edit_bones[idx]
+                edit_bone.roll = roll
+        finally:
+            bpy.ops.object.mode_set(mode='OBJECT')
+
     
     def _create_mesh(self, context, zms, filename, armature_obj):
         """Create mesh from ZMS data and optionally link to armature."""
@@ -326,7 +394,8 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
                 else:
                     group_name = f"zms_bone_{i}"
                 
-                obj.vertex_groups.new(name=group_name)
+                if group_name not in obj.vertex_groups:
+                    obj.vertex_groups.new(name=group_name)
             
             # Assign weights per vertex
             for vi, v in enumerate(zms.vertices):
@@ -338,12 +407,17 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
                         continue
                     
                     if weight and weight > 0.0:
-                        try:
-                            group_index = zms.bones.index(bone_id)
-                            if 0 <= group_index < len(obj.vertex_groups):
-                                obj.vertex_groups[group_index].add([vi], weight, 'REPLACE')
-                        except ValueError:
-                            pass
+                        # bone_indices are global ZMD bone ids (empirically they
+                        # can exceed len(zms.bones)), so map straight to the
+                        # armature bone name.
+                        if 0 <= bone_id < len(bone_names):
+                            group_name = bone_names[bone_id]
+                        else:
+                            continue
+                        vg = obj.vertex_groups.get(group_name)
+                        if vg is None:
+                            vg = obj.vertex_groups.new(name=group_name)
+                        vg.add([vi], weight, 'REPLACE')
         
         # Store ZMS metadata
         obj["zms_version"] = zms.version
