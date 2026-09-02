@@ -140,3 +140,52 @@ at (-240, -400) m).
 Both agree on Z-up; they differ in how the Y axis is folded. The addon's
 convention is the one used by `import_map.py` - keep it consistent when
 adding features.
+
+## Back-slot equipment meshes: the 2026-09-01 wing orientation fix
+
+Symptom chain while shipping a resculpted `BACK_WING12.ZMS`: wings sideways
+in-game; rotated +90 in Blender -> still sideways; rotated back -> upside
+down; 180 about Z -> upright but grafted to the chest; flipped depth axis ->
+correct but floating; final offset -> correct.
+
+Root facts (verified in the Rust client, not guessed):
+
+- `spawn_model` (rose-offline-client `src/model_loader.rs`) spawns every
+  ZSC part mesh with `Transform::default()` parented to a skeleton bone.
+  **The part position/rotation/scale from LIST_BACK.ZSC is ignored** (the
+  BACK_WING12 entry is identity anyway, so the real engine never corrected
+  it either).
+- The Back slot parents to dummy bone index 3 (`p_03` in MALE/FEMALE.ZMD,
+  parent `b1_chest`, identity local rotation, ~on the spine).
+- `zms_asset_loader.rs` rewrites mesh attributes `(x, y, z) -> (x, z, -y)`.
+
+Net effect - the only orientation is the one baked into the file:
+
+| File axis | In-game direction |
+|-----------|-------------------|
+| +X        | up (game vertical) |
+| -Y        | backward (behind the character) |
+| ±Z        | left / right wing pair |
+
+(+8 deg forward lean comes from the chest bone bind pose.)
+
+Authoring rule for equipped back-slot ZMS (wings, capes): build the mesh in
+**file space** - tips toward +X, pair mirrored across Z, sweep toward -Y,
+wing roots near Y = 0 tucked into the torso, and nudge the whole fan a
+little further back (BACK_WING12 ended at Y in [-0.81, -0.08]) so it clears
+the back. Export **verbatim**:
+`export_zms_mesh_object(obj, path, version=8, apply_world_transform=False,
+convert_coordinates=False)`. Never apply a "stand it up for the Blender
+viewport" rotation before exporting; that rotation must stay unapplied (or
+exist only as a parent/display transform), because the game applies its own
+equivalent mapping at load.
+
+Note: the stock `BACK_WING12.ZMS` is *not* upright on this client - it
+displays sideways, since the shipped file relies on transforms the client
+does not apply. Compare against the `.bak` only for scale/attach framing,
+not for orientation.
+
+Debug recipe (file->game axis map without launching the game): load
+MALE.ZMD, compute the global bind pose of dummy `p_03` using the client's
+own conversions (`pos (x, z, -y)/100`, `Quat::from_xyzw(x, z, -y, w)`,
+hierarchy multiply), then compose with the loader swap above.
