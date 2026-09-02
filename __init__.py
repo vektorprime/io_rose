@@ -30,6 +30,8 @@ if "bpy" in locals():
         importlib.reload(import_zms_zmd)
     if "export_zms" in locals():
         importlib.reload(export_zms)
+    if "export_zmo" in locals():
+        importlib.reload(export_zmo)
     if "enhance_wings" in locals():
         importlib.reload(enhance_wings)
     if "export_zone" in locals():
@@ -42,6 +44,7 @@ else:
     from .import_zmd import ImportZMD
     from .import_zms import ImportZMS
     from .export_zms import ExportZMS
+    from .export_zmo import ExportZMO
     from .import_zsc import ImportZSC
     from .enhance_wings import EnhanceWings
     from .import_zmo import ImportZMO
@@ -52,6 +55,7 @@ import bpy
 
 def menu_func_export(self, context):
     self.layout.operator(ExportZMS.bl_idname, text="ROSE Mesh (.zms)")
+    self.layout.operator(ExportZMO.bl_idname, text="ROSE Animation (.zmo)")
     self.layout.operator(ExportZone.bl_idname, text="ROSE Zone (.zon) - Save Edited Zone")
     self.layout.operator(AddZoneObject.bl_idname, text="ROSE Object - Add Selected Mesh to Zone")
     
@@ -75,6 +79,7 @@ def register():
     bpy.utils.register_class(ImportZMD)
     bpy.utils.register_class(ImportZMS)
     bpy.utils.register_class(ExportZMS)
+    bpy.utils.register_class(ExportZMO)
     bpy.utils.register_class(ImportZMO)
     bpy.utils.register_class(ImportZMSwithZMD)
     bpy.utils.register_class(ExportZone)
@@ -93,6 +98,7 @@ def unregister():
     bpy.utils.unregister_class(ImportZMD)
     bpy.utils.unregister_class(ImportZMS)
     bpy.utils.unregister_class(ExportZMS)
+    bpy.utils.unregister_class(ExportZMO)
     bpy.utils.unregister_class(ImportZMO)
     bpy.utils.unregister_class(ImportZMSwithZMD)
     bpy.utils.unregister_class(ExportZone)
