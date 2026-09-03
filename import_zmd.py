@@ -1,4 +1,5 @@
 from pathlib import Path
+import math
 import bpy
 import mathutils as bmath
 from bpy.props import StringProperty, BoolProperty
@@ -15,7 +16,7 @@ class ImportZMD(bpy.types.Operator, ImportHelper):
 
     filename_ext = ".zmd"
     filter_glob: StringProperty(
-        default="*.zmd",
+        default="*.zmd;*.ZMD",
         options={"HIDDEN"}
     )
 
@@ -67,74 +68,174 @@ class ImportZMD(bpy.types.Operator, ImportHelper):
             self.report({'ERROR'}, f"Failed to create bones: {str(e)}")
             bpy.ops.object.mode_set(mode='OBJECT')
             return {"CANCELLED"}
-        
+
         bpy.ops.object.mode_set(mode='OBJECT')
 
-        self.report({'INFO'}, f"Imported {len(zmd.bones)} bones from {filename}")
+        # Bone head/tail/roll cannot store an arbitrary rotation frame
+        # directly, so solve the roll per bone so matrix_local matches the
+        # ZMD rest transform (Blender deforms with pose @ rest^-1 while the
+        # engine uses pose @ bind^-1; a mismatched rest corrupts animation).
+        self._align_rest_to_zmd(zmd, obj)
+
+        self.report({'INFO'}, f"Imported {len(zmd.bones)} bones "
+                              f"({len(zmd.dummies)} dummies) from {filename}")
         return {"FINISHED"}
 
-    def bones_from_zmd(self, zmd, armature):
-        """Create Blender bones from ZMD bone data"""
-        
-        # Create all bones first so parenting can be done later
+    def _zmd_entries(self, zmd):
+        """Flattened (name, parent, pos, rot) list: bones then dummies.
+
+        Dummy parents index into the bone array (dummies are appended after
+        bones in the engine joint list), so parent indices < len(bones)
+        resolve to bones while anything else is treated as root.
+        """
+        entries = []
         for rose_bone in zmd.bones:
-            bone = armature.edit_bones.new(rose_bone.name)
+            entries.append((rose_bone.name, rose_bone.parent_id,
+                            bmath.Vector(rose_bone.position.as_tuple()),
+                            bmath.Quaternion(rose_bone.rotation.as_tuple(w_first=True))))
+        n_bones = len(zmd.bones)
+        for dummy in zmd.dummies:
+            parent = dummy.parent_id
+            if parent < 0 or parent >= n_bones:
+                self.report({'WARNING'},
+                    f"Invalid parent ID {dummy.parent_id} for dummy {dummy.name}; "
+                    f"attaching to root")
+                parent = -1
+            entries.append((dummy.name, parent,
+                            bmath.Vector(dummy.position.as_tuple()),
+                            bmath.Quaternion(dummy.rotation.as_tuple(w_first=True))))
+        return entries
+
+    def _world_transforms(self, zmd):
+        """Compose world transforms, independent of bone order in the file.
+
+        The ZMD format imposes no parent-before-child ordering, so parents
+        are resolved iteratively instead of assuming parent_id < idx.
+        Invalid bone parents fall back to root with a warning.
+        """
+        entries = self._zmd_entries(zmd)
+        n_bones = len(zmd.bones)
+        world_positions = [bmath.Vector((0.0, 0.0, 0.0)) for _ in entries]
+        world_rotations = [bmath.Quaternion((1.0, 0.0, 0.0, 0.0)) for _ in entries]
+
+        def valid_parent(idx, parent):
+            # Bones reference bones; dummies reference bones only.
+            limit = n_bones if idx >= n_bones else len(entries)
+            return parent is not None and 0 <= parent < limit and parent != idx
+
+        # Roots first, then iteratively resolve children whose parent is done.
+        # A full pass with no progress means a cycle; attach the remainder
+        # to the root rather than failing the whole import.
+        resolved = set()
+        for idx, (_name, parent, pos, rot) in enumerate(entries):
+            if parent == -1 or not valid_parent(idx, parent):
+                if parent != -1 and parent is not None:
+                    self.report({'WARNING'},
+                        f"Invalid parent ID {parent} for bone {_name}; "
+                        f"attaching to root")
+                world_positions[idx] = pos
+                world_rotations[idx] = rot
+                resolved.add(idx)
+
+        remaining = set(range(len(entries))) - resolved
+        while remaining:
+            progress = False
+            for idx in list(remaining):
+                _name, parent, pos, rot = entries[idx]
+                if valid_parent(idx, parent) and parent in resolved:
+                    world_positions[idx] = world_positions[parent] + (world_rotations[parent] @ pos)
+                    world_rotations[idx] = world_rotations[parent] @ rot
+                    resolved.add(idx)
+                    remaining.discard(idx)
+                    progress = True
+            if not progress:
+                for idx in list(remaining):
+                    _name, _parent, pos, rot = entries[idx]
+                    self.report({'WARNING'},
+                        f"Parent cycle involving bone {_name}; attaching to root")
+                    world_positions[idx] = pos
+                    world_rotations[idx] = rot
+                    resolved.add(idx)
+                    remaining.discard(idx)
+
+        return entries, world_positions, world_rotations
+
+    def bones_from_zmd(self, zmd, armature):
+        """Create Blender bones from ZMD bone + dummy data"""
+
+        entries, world_positions, world_rotations = self._world_transforms(zmd)
+
+        # Create all bones first so parenting can be done later
+        for (name, _parent, _pos, _rot) in entries:
+            bone = armature.edit_bones.new(name)
             bone.use_connect = False
 
-        # Build world transforms for each bone
-        world_positions = []
-        world_rotations = []
-        
-        for idx, rose_bone in enumerate(zmd.bones):
-            pos = bmath.Vector(rose_bone.position.as_tuple())
-            rot = bmath.Quaternion(rose_bone.rotation.as_tuple(w_first=True))
-            
-            if rose_bone.parent_id == -1:
-                # Root bone - use local transform as world transform
-                world_positions.append(pos)
-                world_rotations.append(rot)
-            else:
-                # Child bone - transform by parent's world transform
-                parent_pos = world_positions[rose_bone.parent_id]
-                parent_rot = world_rotations[rose_bone.parent_id]
-                
-                # Rotate position by parent rotation, then add parent position
-                world_pos = parent_pos + (parent_rot @ pos)
-                world_rot = parent_rot @ rot
-                
-                world_positions.append(world_pos)
-                world_rotations.append(world_rot)
-
         # Now set bone positions and parenting
-        for idx, rose_bone in enumerate(zmd.bones):
+        for idx, (name, parent, _pos, _rot) in enumerate(entries):
             bone = armature.edit_bones[idx]
-            
+
             world_pos = world_positions[idx]
             world_rot = world_rotations[idx]
 
-            if rose_bone.parent_id == -1:
-                # Root bone
-                bone.head = world_pos
-                bone.tail = world_pos + bmath.Vector((0, 0, 0.1))
-                
-                if self.keep_root_bone and bone.length < 0.0001:
+            if parent != -1 and 0 <= parent < len(armature.edit_bones):
+                bone.parent = armature.edit_bones[parent]
+
+            # Set tail to point in direction of rotation
+            bone.head = world_pos
+            bone.tail = world_pos + (world_rot @ bmath.Vector((0, 0.1, 0)))
+
+            # Ensure minimum bone length
+            if bone.length < 0.001:
+                if parent == -1 and self.keep_root_bone:
                     bone.tail = bone.head + bmath.Vector((0, 0, 0.1))
-            else:
-                # Child bone
-                if rose_bone.parent_id >= len(armature.edit_bones):
-                    self.report({'WARNING'}, 
-                        f"Invalid parent ID {rose_bone.parent_id} for bone {rose_bone.name}")
-                    continue
-                
-                bone.parent = armature.edit_bones[rose_bone.parent_id]
-                bone.head = world_pos
-                
-                # Set tail to point in direction of rotation
-                bone.tail = world_pos + (world_rot @ bmath.Vector((0, 0.1, 0)))
-                
-                # Ensure minimum bone length
-                if bone.length < 0.001:
+                    if bone.length < 0.0001:
+                        bone.tail = bone.head + bmath.Vector((0, 0.001, 0))
+                else:
                     bone.tail = bone.head + bmath.Vector((0, 0.001, 0))
+
+    def _align_rest_to_zmd(self, zmd, armature_obj):
+        """Set bone roll so matrix_local matches the ZMD rest transform.
+
+        A Blender bone only stores direction + roll (5 DOF) while ZMD gives
+        a full rotation, so after the first pass (roll=0) the required roll
+        is the signed angle around the bone Y axis from the base X axis to
+        the ZMD rest X axis. Covers bones and dummies alike.
+        """
+        entries, world_positions, world_rotations = self._world_transforms(zmd)
+
+        bones = armature_obj.data.bones
+        rolls = {}
+        for idx, (name, parent, _pos, _rot) in enumerate(entries):
+            bone = bones.get(name)
+            if bone is None:
+                continue
+            if parent == -1 or parent < 0 or parent >= len(entries):
+                parent_local = bmath.Matrix.Identity(4)
+            else:
+                pb = bones.get(entries[parent][0])
+                parent_local = pb.matrix_local if pb else bmath.Matrix.Identity(4)
+            # Desired local rotation (ZMD), and actual local frame at roll=0
+            desired = parent_local.to_3x3().inverted() @ world_rotations[idx].to_matrix()
+            actual = parent_local.to_3x3().inverted() @ bone.matrix_local.to_3x3()
+            d = actual.col[1].normalized()
+            x0 = actual.col[0].normalized()
+            xt = (desired @ bmath.Vector((1, 0, 0))).normalized()
+            xt = xt - xt.dot(d) * d
+            if xt.length < 1e-6:
+                continue
+            xt.normalize()
+            rolls[idx] = math.atan2(x0.cross(xt).dot(d), x0.dot(xt))
+
+        if not rolls:
+            return
+        bpy.context.view_layer.objects.active = armature_obj
+        bpy.ops.object.mode_set(mode='EDIT')
+        try:
+            for idx, roll in rolls.items():
+                edit_bone = armature_obj.data.edit_bones[idx]
+                edit_bone.roll = roll
+        finally:
+            bpy.ops.object.mode_set(mode='OBJECT')
 
 
 def menu_func_import(self, context):

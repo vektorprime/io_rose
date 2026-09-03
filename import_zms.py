@@ -16,7 +16,7 @@ class ImportZMS(bpy.types.Operator, ImportHelper):
     bl_options = {"PRESET"}
 
     filename_ext = ".ZMS"
-    filter_glob: StringProperty(default="*.ZMS", options={"HIDDEN"})
+    filter_glob: StringProperty(default="*.zms;*.ZMS", options={"HIDDEN"})
     load_texture: BoolProperty(
         name = "Load texture",
         description = ( "Automatically detect and load a texture if "
@@ -175,6 +175,21 @@ class ImportZMS(bpy.types.Operator, ImportHelper):
                 v = zms.vertices[vi].uv4.y
                 mesh.uv_layers["uv4"].data[loop_idx].uv = (u, 1-v)  # Flip V
 
+        #-- Vertex colors (matches ZmsFile.color / client MESH_ATTRIBUTE_COLOR).
+        # Stored as a POINT-domain color attribute so the exporter can
+        # round-trip them; without this, re-export writes white instead of
+        # the original tint.
+        if zms.colors_enabled():
+            try:
+                color_attr = mesh.color_attributes.new(
+                    name="Color", type='FLOAT_COLOR', domain='POINT')
+                for vi, v in enumerate(zms.vertices):
+                    if vi < len(color_attr.data):
+                        color_attr.data[vi].color = (
+                            v.color.r, v.color.g, v.color.b, v.color.a)
+            except Exception as e:
+                self.report({'WARNING'}, f"Could not import vertex colors: {e}")
+
         #-- Material
         mat = bpy.data.materials.new(filename)
         mat.use_nodes = True
@@ -183,6 +198,7 @@ class ImportZMS(bpy.types.Operator, ImportHelper):
         mat_node = nodes["Principled BSDF"]
         tex_node = nodes.new(type="ShaderNodeTexImage")
 
+        texture_loaded = False
         if self.load_texture:
             # Check if DDS or PNG exists
             for ext in self.texture_extensions:
@@ -191,12 +207,23 @@ class ImportZMS(bpy.types.Operator, ImportHelper):
                 if not p.is_file():
                     continue
 
-                image = bpy.data.images.load(str(p))
-                tex_node.image = image
-                break
+                try:
+                    image = bpy.data.images.load(str(p), check_existing=True)
+                    tex_node.image = image
+                    texture_loaded = True
+                    break
+                except Exception as e:
+                    self.report({'WARNING'},
+                        f"Could not load texture {p.name}: {e}")
+                    continue
 
-        links = mat.node_tree.links
-        links.new(tex_node.outputs["Color"], mat_node.inputs["Base Color"])
+        # Only link the texture when an image actually loaded; otherwise the
+        # material renders black with no indication of why.
+        if texture_loaded:
+            links = mat.node_tree.links
+            links.new(tex_node.outputs["Color"], mat_node.inputs["Base Color"])
+        else:
+            nodes.remove(tex_node)
         mesh.materials.append(mat)
 
         mesh.update(calc_edges=True)

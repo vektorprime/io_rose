@@ -12,9 +12,56 @@ from bpy.props import StringProperty, BoolProperty, EnumProperty
 from bpy_extras.io_utils import ExportHelper
 
 
+def _mesh_has_colors(mesh):
+    """True if the mesh carries vertex colors (legacy or 4.x attributes)."""
+    if len(mesh.vertex_colors) > 0:
+        return True
+    try:
+        return len(mesh.color_attributes) > 0
+    except Exception:
+        return False
+
+
+def _loop_color(mesh, loop_idx, vert_idx):
+    """RGBA tuple for a mesh loop, or None if the mesh has no colors.
+
+    Prefers legacy vertex colors (per-loop), then 4.x color attributes
+    (per-loop for CORNER domain, per-vertex for POINT domain).
+    """
+    if len(mesh.vertex_colors) > 0:
+        layer = mesh.vertex_colors[0]
+        if loop_idx < len(layer.data):
+            color = layer.data[loop_idx].color
+            return (color[0], color[1], color[2],
+                    color[3] if len(color) > 3 else 1.0)
+        return None
+    try:
+        attrs = mesh.color_attributes
+    except Exception:
+        return None
+    if len(attrs) == 0:
+        return None
+    attr = attrs[0]
+    try:
+        if attr.domain == 'CORNER':
+            if loop_idx < len(attr.data):
+                color = attr.data[loop_idx].color
+            else:
+                return None
+        else:  # POINT and other per-vertex domains
+            if vert_idx < len(attr.data):
+                color = attr.data[vert_idx].color
+            else:
+                return None
+    except Exception:
+        return None
+    return (color[0], color[1], color[2],
+            color[3] if len(color) > 3 else 1.0)
+
+
 def export_zms_mesh_object(obj, filepath, version=8, export_normals=True,
                            export_colors=True, export_uv=True, report=None,
-                           apply_world_transform=True, convert_coordinates=True):
+                           apply_world_transform=True, convert_coordinates=False):
     """Export a Blender mesh object to a ZMS file (shared by the manual
     export operator and the zone exporter).
 
@@ -23,6 +70,11 @@ def export_zms_mesh_object(obj, filepath, version=8, export_normals=True,
         filepath: destination .ZMS path
         version: ZMS version (5-8)
         report: optional callable(level, message) for progress messages
+        convert_coordinates: apply the Blender -> ROSE (x, -y, z) mirror.
+            Defaults to False so export is the exact inverse of import
+            (importers read vertices verbatim). When True, triangle winding
+            is swapped to compensate the mirror determinant (-1) so faces
+            and normals stay consistent.
 
     Returns:
         None on success, or an error string on failure.
@@ -57,12 +109,14 @@ def export_zms_mesh_object(obj, filepath, version=8, export_normals=True,
     # C++ uses uint16 for num_verts, num_faces in memory
     # Version 5/6 file format uses uint32 for counts
     # Version 7/8 file format uses uint16 for counts (matches C++ memory)
-    if len(mesh.vertices) > 65535:
-        return f"Mesh has {len(mesh.vertices)} vertices. C++ uses uint16 (max 65,535)."
+    # Version 9 uses u32 counts/indices for large meshes
+    count_limit = 0xFFFFFFFF if version >= 9 else 65535
+    if len(mesh.vertices) > count_limit:
+        return f"Mesh has {len(mesh.vertices)} vertices (max {count_limit} for v{version})."
 
     mesh.calc_loop_triangles()
-    if len(mesh.loop_triangles) > 65535:
-        return f"Mesh has {len(mesh.loop_triangles)} triangles. C++ uses uint16 (max 65,535)."
+    if len(mesh.loop_triangles) > count_limit:
+        return f"Mesh has {len(mesh.loop_triangles)} triangles (max {count_limit} for v{version})."
 
     # Apply all transformations before export (only for world-space meshes;
     # imported ROSE meshes are kept in local space for a faithful round trip)
@@ -134,9 +188,9 @@ def export_zms_mesh_object(obj, filepath, version=8, export_normals=True,
     if orig_bones is not None:
         zms.bones = orig_bones
 
-    # Final validation - C++ uses uint16 for everything in memory
-    if len(zms.vertices) > 65535:
-        return f"After processing: {len(zms.vertices)} vertices (max 65,535). Mesh has UV seams that split vertices."
+    # Final validation - C++ uses uint16 for everything in memory (u32 for v9)
+    if len(zms.vertices) > count_limit:
+        return f"After processing: {len(zms.vertices)} vertices (max {count_limit}). Mesh has UV seams that split vertices."
 
     # Validate indices don't exceed vertex count
     max_idx = 0
@@ -168,6 +222,7 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
         description="Choose ZMS file version to export",
         items=[
             ('8', "Version 8 (ZMS0008)", "Modern format, recommended"),
+            ('9', "Version 9 (ZMS0009)", "Large-mesh format (u32 counts/indices)"),
             ('7', "Version 7 (ZMS0007)", "Version 7 format"),
             ('6', "Version 6 (ZMS0006)", "Legacy format with materials"),
             ('5', "Version 5 (ZMS0005)", "Oldest format"),
@@ -212,7 +267,7 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
     
     def zms_from_mesh_data(self, mesh, obj=None, orig_bones=None, version=8,
                            export_normals=None, export_colors=None, export_uv=None,
-                           convert_coordinates=True, report=None):
+                           convert_coordinates=False, report=None):
         """Extract ZMS data from mesh data"""
         # Create a report function wrapper
         if report is None:
@@ -233,6 +288,8 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
             zms.identifier = "ZMS0006"
         elif version == 7:
             zms.identifier = "ZMS0007"
+        elif version == 9:
+            zms.identifier = "ZMS0009"
         else:
             zms.identifier = "ZMS0008"
 
@@ -248,7 +305,7 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
         if export_normals and len(mesh.vertices) > 0:
             zms.flags |= VertexFlags.NORMAL
 
-        if export_colors and len(mesh.vertex_colors) > 0:
+        if export_colors and _mesh_has_colors(mesh):
             zms.flags |= VertexFlags.COLOR
 
         if export_uv:
@@ -293,11 +350,10 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
                         uv = mesh.uv_layers[uv_idx].data[loop_idx].uv
                         uv_key.extend([round(uv[0], 6), round(uv[1], 6)])
                 
-                if export_colors and len(mesh.vertex_colors) > 0:
-                    color_layer = mesh.vertex_colors[0]
-                    if loop_idx < len(color_layer.data):
-                        color = color_layer.data[loop_idx].color
-                        uv_key.extend([round(c, 6) for c in color])
+                if export_colors and zms.colors_enabled():
+                    loop_c = _loop_color(mesh, loop_idx, vert_idx)
+                    if loop_c is not None:
+                        uv_key.extend([round(c, 6) for c in loop_c])
                 
                 key = tuple(uv_key)
                 
@@ -332,10 +388,10 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
                     
                     # zz_color (4x float)
                     if zms.colors_enabled():
-                        if len(mesh.vertex_colors) > 0 and loop_idx < len(mesh.vertex_colors[0].data):
-                            color = mesh.vertex_colors[0].data[loop_idx].color
-                            v.color = Color4(color[0], color[1], color[2], 
-                                           color[3] if len(color) > 3 else 1.0)
+                        loop_c = _loop_color(mesh, loop_idx, vert_idx)
+                        if loop_c is not None:
+                            v.color = Color4(loop_c[0], loop_c[1], loop_c[2],
+                                           loop_c[3])
                         else:
                             v.color = Color4(1.0, 1.0, 1.0, 1.0)
                     
@@ -386,10 +442,16 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
                     vertex_map[key] = new_idx
                 
                 tri_indices.append(vertex_map[key])
-            
-            # usvec3 - 3x uint16 indices per face
+
+            # usvec3 - 3x uint16 indices per face.
+            # The (x, -y, z) coordinate mirror has determinant -1, so when
+            # convert_coordinates is on the winding is swapped to keep
+            # faces and normals consistent instead of inverted.
             if len(tri_indices) == 3:
-                zms.indices.append(Vector3(tri_indices[0], tri_indices[1], tri_indices[2]))
+                if convert_coordinates:
+                    zms.indices.append(Vector3(tri_indices[0], tri_indices[2], tri_indices[1]))
+                else:
+                    zms.indices.append(Vector3(tri_indices[0], tri_indices[1], tri_indices[2]))
         
         # Calculate bounding box (vec3 pmin, pmax)
         if len(zms.vertices) > 0:
@@ -525,18 +587,24 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
     
     @staticmethod
     def _write_version8(f, zms, version):
-        """Write ZMS version 7 or 8 format
-        
-        File format matches C++ memory: uint16 for counts and indices
+        """Write ZMS version 7, 8 or 9 format
+
+        File format matches C++ memory: uint16 for counts and indices,
+        except version 9 which uses u32 vertex/triangle counts and u32
+        indices for large meshes.
         """
+        large = version >= 9
         # Write bone count and bones (uint16 - std::vector<uint16>)
         f.write(struct.pack("<H", len(zms.bones)))  # uint16 num_bones
         for bone in zms.bones:
             f.write(struct.pack("<H", bone))  # uint16 bone_indices[i]
-        
-        # Write vertex count (uint16 num_verts)
+
+        # Write vertex count (uint16 num_verts, u32 for v9 large meshes)
         vert_count = len(zms.vertices)
-        f.write(struct.pack("<H", vert_count))
+        if large:
+            f.write(struct.pack("<I", vert_count))
+        else:
+            f.write(struct.pack("<H", vert_count))
         
         # Write vertex data (no vertex_id prefix)
         if zms.positions_enabled():
@@ -584,12 +652,19 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
             for v in zms.vertices:
                 ExportZMS.write_vector2_f32(f, v.uv4)
         
-        # Write indices (flat array) - usvec3 = 3x uint16
-        f.write(struct.pack("<H", len(zms.indices)))  # uint16 num_faces
-        for idx in zms.indices:
-            f.write(struct.pack("<H", int(idx.x)))  # uint16
-            f.write(struct.pack("<H", int(idx.y)))
-            f.write(struct.pack("<H", int(idx.z)))
+        # Write indices (flat array) - usvec3 = 3x uint16 (u32 for v9)
+        if large:
+            f.write(struct.pack("<I", len(zms.indices)))  # u32 num_faces
+            for idx in zms.indices:
+                f.write(struct.pack("<I", int(idx.x)))  # u32
+                f.write(struct.pack("<I", int(idx.y)))
+                f.write(struct.pack("<I", int(idx.z)))
+        else:
+            f.write(struct.pack("<H", len(zms.indices)))  # uint16 num_faces
+            for idx in zms.indices:
+                f.write(struct.pack("<H", int(idx.x)))  # uint16
+                f.write(struct.pack("<H", int(idx.y)))
+                f.write(struct.pack("<H", int(idx.z)))
         
         # Write materials (uint16 matid_numfaces array)
         f.write(struct.pack("<H", len(zms.materials)))  # uint16 num_matids

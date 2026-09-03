@@ -12,7 +12,7 @@ from mathutils import Quaternion, Vector, Matrix
 from bpy.props import StringProperty, IntProperty, FloatProperty
 from bpy_extras.io_utils import ImportHelper
 
-from .rose.zmo import ZMO, ZmoChannelType, ZmoPositionChannel, ZmoRotationChannel, ZmoScaleChannel
+from .rose.zmo import ZMO, ZmoChannelType
 from .rose.zmd import ZMD
 
 
@@ -84,27 +84,93 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
         # Create animation action
         action = bpy.data.actions.new(name=filename)
         action.use_fake_user = True
-        
+
         # Set frame rate
-        context.scene.render.fps = zmo.fps
+        if zmo.fps > 0:
+            context.scene.render.fps = zmo.fps
+        else:
+            self.report({'WARNING'},
+                f"ZMO has invalid FPS {zmo.fps}; keeping scene frame rate")
         context.scene.frame_start = self.start_frame
         context.scene.frame_end = self.start_frame + zmo.num_frames - 1
-        
+
         # ZMO rotation/position channels are absolute local transforms in
         # parent space that REPLACE the ZMD rest transform. To convert them
         # into Blender pose-space keyframes we need the source ZMD.
         zmd = self._load_source_zmd(armature_obj)
 
+        # F-Curves must be written into the channelbag of this armature's
+        # slot (Blender 4.4+ slotted actions); legacy action.fcurves is only
+        # a proxy for the first slot.
+        slot = self._get_or_create_slot(action, armature_obj)
+        fcurve_store = self._fcurve_store(action, slot)
+
         # Apply animation to armature
-        self._apply_animation(armature_obj, action, zmo, zmd)
-        
-        # Assign action to armature
+        self._apply_animation(armature_obj, action, fcurve_store, zmo, zmd)
+
+        # Assign action to armature. On Blender 4.4+ the slot must be
+        # assigned explicitly: assigning an action alone may leave the
+        # data-block in a non-animated state.
         if not armature_obj.animation_data:
             armature_obj.animation_data_create()
         armature_obj.animation_data.action = action
-        
+        if slot is not None:
+            try:
+                armature_obj.animation_data.action_slot = slot
+            except (AttributeError, TypeError, RuntimeError) as e:
+                self.report({'WARNING'},
+                    f"ZMO: could not assign action slot: {e}")
+
+        # Stash frame events + interpolation interval on the action so the
+        # ZMO exporter can round-trip them (they drive combat timing).
+        try:
+            action["zmo_frame_events"] = list(zmo.frame_events)
+            action["zmo_interp_ms"] = (int(zmo.interpolation_interval_ms)
+                                       if zmo.interpolation_interval_ms is not None
+                                       else 500)
+        except (TypeError, ValueError, RuntimeError) as e:
+            self.report({'WARNING'},
+                f"ZMO: could not store frame events on action: {e}")
+
         self.report({'INFO'}, f"Imported {filename} ({zmo.num_frames} frames @ {zmo.fps} FPS)")
         return {"FINISHED"}
+
+    def _get_or_create_slot(self, action, armature_obj):
+        """Return an OBJECT slot for the armature, creating it if needed.
+
+        Returns None on Blender versions without slotted actions (< 4.4),
+        in which case callers fall back to the legacy action.fcurves API.
+        """
+        try:
+            slots = action.slots
+        except AttributeError:
+            return None
+        for existing in slots:
+            if existing.name == armature_obj.name:
+                return existing
+        try:
+            return slots.new(id_type='OBJECT', name=armature_obj.name)
+        except (TypeError, RuntimeError) as e:
+            self.report({'WARNING'}, f"ZMO: could not create action slot: {e}")
+            return None
+
+    def _fcurve_store(self, action, slot):
+        """F-Curve collection writing into the action's channelbag for slot.
+
+        Uses the layered API on Blender 4.4+ (single layer + keyframe
+        strip), falling back to the legacy action.fcurves proxy.
+        """
+        if slot is not None:
+            try:
+                layers = action.layers
+                layer = layers[0] if len(layers) else layers.new("ROSE")
+                strips = layer.strips
+                strip = strips[0] if len(strips) else strips.new(type='KEYFRAME')
+                return strip.channelbag(slot, ensure=True).fcurves
+            except (AttributeError, TypeError, RuntimeError, IndexError) as e:
+                self.report({'WARNING'},
+                    f"ZMO: layered action API unavailable ({e}); using legacy F-Curves")
+        return action.fcurves
     
     def _get_target_armature(self, context):
         """Get the target armature object."""
@@ -147,21 +213,78 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
                     self.report({'WARNING'}, f"ZMO: failed to load ZMD {path.name}: {e}")
         return None
 
-    def _compute_world_matrices(self, zmd, bone_channels, frame_idx):
-        """Compute per-bone world transforms for one frame, ROSE-style.
+    def _rest_entries(self, zmd):
+        """Flattened rest data over the engine joint list (bones + dummies).
+
+        The client chains dummy joints after the bones
+        (model_loader.rs joints), so ZMO channel indices address this
+        combined list. Positions are meters (parser-scaled), rotations
+        Blender-order quaternions. Parents always index real bones; anything
+        else falls back to root with a one-time warning (validated here, not
+        per frame).
+        """
+        names = [b.name for b in zmd.bones] + [d.name for d in zmd.dummies]
+        n_bones = len(zmd.bones)
+        joints = list(zmd.bones) + list(zmd.dummies)
+        parents, positions, quats = [], [], []
+        for idx, joint in enumerate(joints):
+            parent = joint.parent_id
+            kind = 'dummy' if idx >= n_bones else 'bone'
+            if parent is None or not (0 <= parent < n_bones) or parent == idx:
+                if parent != -1:
+                    self.report({'WARNING'},
+                        f"ZMO: invalid parent ID {parent} for {kind} "
+                        f"'{names[idx]}'; treating as root")
+                parent = -1
+            parents.append(parent)
+            positions.append(Vector(joint.position.as_tuple()))
+            quats.append(Quaternion(joint.rotation.as_tuple(w_first=True)))
+        return names, parents, positions, quats
+
+    def _pseudo_zmd_from_armature(self, armature_obj):
+        """Synthesize ZMD-like rest data from the armature's own rest pose.
+
+        Used when no source ZMD file is available. The armature rest
+        (matrix_local, after rest alignment) already equals the ZMD rest, so
+        the same matrix composition applies. Parent-space locals are derived
+        from the world-space rest matrices; positions are meters.
+        """
+        from types import SimpleNamespace
+        from .rose.utils import Vector3 as RVector3, Quat as RQuat
+        arm_bones = list(armature_obj.data.bones)
+        index = {b.name: i for i, b in enumerate(arm_bones)}
+        pseudo = []
+        for bone in arm_bones:
+            if bone.parent is not None and bone.parent.name in index:
+                parent = arm_bones[index[bone.parent.name]]
+                local = parent.matrix_local.inverted() @ bone.matrix_local
+                parent_id = index[bone.parent.name]
+            else:
+                local = bone.matrix_local.copy()
+                parent_id = -1
+            t = local.translation
+            q = local.to_quaternion()
+            pseudo.append(SimpleNamespace(
+                name=bone.name, parent_id=parent_id,
+                position=RVector3(t.x, t.y, t.z),
+                rotation=RQuat(q.x, q.y, q.z, q.w)))
+        return SimpleNamespace(bones=pseudo, dummies=[])
+
+    def _compute_world_matrices(self, rest, bone_channels, frame_idx):
+        """Compute per-joint world transforms for one frame, ROSE-style.
 
         local[i] = T(position) @ Q(rotation) @ S(scale) where each component
         comes from the ZMO channel when present (positions in cm, scaled to
-        scene units) or falls back to the ZMD rest transform.
+        scene units) or falls back to the rest transform.
         world[i] = world[parent] @ local[i].
         """
-        num_bones = len(zmd.bones)
-        world = [None] * num_bones
+        _names, parents, rest_pos, rest_quat = rest
+        num_joints = len(_names)
+        world = [None] * num_joints
 
         def local(i):
-            bone = zmd.bones[i]
-            pos = Vector(bone.position.as_tuple())
-            quat = Quaternion(bone.rotation.as_tuple(w_first=True))
+            pos = rest_pos[i]
+            quat = rest_quat[i]
             scale = 1.0
             chs = bone_channels.get(i)
             if chs:
@@ -180,7 +303,7 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
                     @ quat.normalized().to_matrix().to_4x4()
                     @ Matrix.Diagonal((scale, scale, scale, 1.0)))
 
-        locals_arr = [None] * num_bones
+        locals_arr = [None] * num_joints
 
         def resolve(i, visiting):
             if world[i] is not None:
@@ -190,35 +313,38 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
             visiting.add(i)
             loc_mat = local(i)
             locals_arr[i] = loc_mat
-            parent = zmd.bones[i].parent_id
-            if 0 <= parent < num_bones and parent != i:
+            parent = parents[i]
+            if 0 <= parent < num_joints and parent != i:
                 world[i] = resolve(parent, visiting) @ loc_mat
             else:
                 world[i] = loc_mat
             return world[i]
 
-        worlds = [resolve(i, set()) for i in range(num_bones)]
+        worlds = [resolve(i, set()) for i in range(num_joints)]
         return worlds, locals_arr
 
-    def _apply_animation_matrix(self, armature_obj, action, zmo, zmd):
-        """Keyframe the armature by composing ROSE bone transforms per frame.
+    def _apply_animation_matrix(self, armature_obj, action, fcurve_store, zmo, zmd):
+        """Keyframe the armature by composing ROSE joint transforms per frame.
 
         The ROSE engine treats ZMO channels as absolute local transforms that
-        REPLACE the ZMD rest transform. Blender's pose recursion is
+        REPLACE the rest transform. Blender's pose recursion is
             pose[i] = pose[parent] @ bone[parent].matrix_local.inverted()
                       @ bone[i].matrix_local @ matrix_basis
         so the per-frame basis that realizes a target ROSE local transform L is:
             matrix_basis = bone.matrix_local.inverted()
                            @ parent.matrix_local @ L
         which is then decomposed into rotation_quaternion / location / scale
-        keyframes.
+        keyframes. Joints are matched to armature bones by name over the
+        bones+dummies chain.
         """
-        bone_names = [bone.name for bone in armature_obj.data.bones]
-        num_bones = min(len(zmd.bones), len(bone_names))
-        if len(zmd.bones) > len(bone_names):
+        joint_names, parents, _rp, _rq = self._rest_entries(zmd)
+        rest = (joint_names, parents, _rp, _rq)
+        num_joints = len(joint_names)
+        arm_bones = armature_obj.data.bones
+        if len(arm_bones) < num_joints:
             self.report({'WARNING'},
-                f"ZMO: ZMD has {len(zmd.bones)} bones but armature has "
-                f"{len(bone_names)} - extra bones skipped")
+                f"ZMO: source has {num_joints} joints but armature has "
+                f"{len(arm_bones)} bones - extra joints skipped")
 
         bone_channels = zmo.get_bone_channels()
         relevant = {ZmoChannelType.POSITION, ZmoChannelType.ROTATION, ZmoChannelType.SCALE}
@@ -226,39 +352,60 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
         for pose_bone in armature_obj.pose.bones:
             pose_bone.rotation_mode = 'QUATERNION'
 
+        # Static per-joint data (rest frames + parent checks); only the local
+        # transform varies per frame. Parent mismatches are reported once.
+        static = []
+        missing = []
+        for i in range(num_joints):
+            chs = bone_channels.get(i)
+            if not chs or not (chs.keys() & relevant):
+                static.append(None)
+                continue
+            bone_name = joint_names[i]
+            bone = arm_bones.get(bone_name)
+            if bone is None:
+                missing.append(bone_name)
+                static.append(None)
+                continue
+            if parents[i] >= 0:
+                expected_parent = joint_names[parents[i]]
+                actual_parent = bone.parent.name if bone.parent is not None else None
+                if actual_parent != expected_parent:
+                    self.report({'WARNING'},
+                        f"ZMO: parent of {bone_name} differs between armature "
+                        f"({actual_parent}) and source ({expected_parent})")
+            parent_rest = (bone.parent.matrix_local if bone.parent is not None
+                           else Matrix.Identity(4))
+            static.append((bone_name, bone, parent_rest))
+        for bone_name in missing:
+            self.report({'WARNING'},
+                f"ZMO: joint '{bone_name}' not found in armature - channel skipped")
+
         def get_fcurve(data_path, index):
-            fcurve = action.fcurves.find(data_path, index=index)
+            fcurve = fcurve_store.find(data_path, index=index)
             if fcurve is None:
-                fcurve = action.fcurves.new(data_path, index=index)
+                fcurve = fcurve_store.new(data_path, index=index)
             return fcurve
 
         def key_vector(data_path, values, frame):
+            # The engine interpolates linearly (lerp/slerp) between integer
+            # frames; Blender keyframes default to BEZIER, which overshoots.
             for axis, value in enumerate(values):
-                get_fcurve(data_path, axis).keyframe_points.insert(frame, value)
+                fcurve = get_fcurve(data_path, axis)
+                key = fcurve.keyframe_points.insert(frame, value)
+                key.interpolation = 'LINEAR'
 
         prev_quats = {}
         for frame_idx in range(zmo.num_frames):
             frame = self.start_frame + frame_idx
-            world, locals_arr = self._compute_world_matrices(zmd, bone_channels, frame_idx)
+            _world, locals_arr = self._compute_world_matrices(rest, bone_channels, frame_idx)
 
-            for i in range(num_bones):
-                chs = bone_channels.get(i)
-                if not chs or not (chs.keys() & relevant):
+            for i in range(num_joints):
+                entry = static[i]
+                if entry is None:
                     continue
+                bone_name, bone, parent_rest = entry
 
-                bone_name = bone_names[i]
-                pose_bone = armature_obj.pose.bones.get(bone_name)
-                if pose_bone is None:
-                    continue
-
-                bone = armature_obj.data.bones[bone_name]
-                if bone.parent is not None and zmd.bones[i].parent_id >= 0 \
-                        and bone.parent.name != bone_names[zmd.bones[i].parent_id]:
-                    self.report({'WARNING'},
-                        f"ZMO: parent of {bone_name} differs between armature "
-                        f"({bone.parent.name}) and ZMD ({bone_names[zmd.bones[i].parent_id]})")
-                parent_rest = (bone.parent.matrix_local if bone.parent is not None
-                               else Matrix.Identity(4))
                 basis = bone.matrix_local.inverted() @ parent_rest @ locals_arr[i]
                 loc, quat, scale = basis.decompose()
 
@@ -272,149 +419,20 @@ class ImportZMO(bpy.types.Operator, ImportHelper):
                 key_vector(f'pose.bones["{bone_name}"].rotation_quaternion', quat, frame)
                 key_vector(f'pose.bones["{bone_name}"].scale', scale, frame)
 
-    def _apply_animation(self, armature_obj, action, zmo, zmd=None):
-        """Apply ZMO animation data to armature.
+    def _apply_animation(self, armature_obj, action, fcurve_store, zmo, zmd=None):
+        """Apply ZMO animation data to armature via matrix composition.
 
-        Preferred path: ZMD-aware matrix composition (see _apply_animation_matrix).
-        The legacy raw-keyframe path below is only used as a fallback when no
-        source ZMD is available, and assumes the ZMO rotations happen to be
-        deltas relative to the rest pose (usually false -> broken poses).
+        When no source ZMD is available, rest frames are derived from the
+        armature itself (its aligned rest equals the ZMD rest), so poses stay
+        correct instead of falling back to raw absolute values as deltas.
         """
-        if zmd is not None:
-            self._apply_animation_matrix(armature_obj, action, zmo, zmd)
-            return
-
-        self.report({'WARNING'},
-            "ZMO: no source ZMD found - using legacy raw keyframes. Import the "
-            "mesh via 'ROSE Mesh with Skeleton' or set 'Source Armature (.zmd)' "
-            "for correct pose-space mapping.")
-        bone_names = [bone.name for bone in armature_obj.data.bones]
-        bone_channels = zmo.get_bone_channels()
-        
-        # Debug logging
-        print(f"=== ZMO Animation Debug ===")
-        print(f"Armature: {armature_obj.name}")
-        print(f"Number of bones in armature: {len(bone_names)}")
-        print(f"Number of bone channels in ZMO: {len(bone_channels)}")
-        
-        # Ensure all pose bones use quaternion rotation mode
-        for pose_bone in armature_obj.pose.bones:
-            pose_bone.rotation_mode = 'QUATERNION'
-        
-        for bone_index, channels in bone_channels.items():
-            if bone_index >= len(bone_names):
-                print(f"WARNING: bone_index {bone_index} >= len(bone_names) {len(bone_names)}")
-                continue
-            
-            bone_name = bone_names[bone_index]
-            
-            # Debug: Log first frame data for each bone
-            pos_channel = channels.get(ZmoChannelType.POSITION)
-            rot_channel = channels.get(ZmoChannelType.ROTATION)
-            
-            if rot_channel and isinstance(rot_channel, ZmoRotationChannel):
-                first_rot = rot_channel.values[0] if rot_channel.values else None
-                if first_rot:
-                    print(f"Bone {bone_index} ({bone_name}): first rotation = ({first_rot.w:.4f}, {first_rot.x:.4f}, {first_rot.y:.4f}, {first_rot.z:.4f})")
-            
-            if pos_channel and isinstance(pos_channel, ZmoPositionChannel):
-                first_pos = pos_channel.values[0] if pos_channel.values else None
-                if first_pos:
-                    print(f"Bone {bone_index} ({bone_name}): first position = ({first_pos.x:.4f}, {first_pos.y:.4f}, {first_pos.z:.4f})")
-            
-            if pos_channel and isinstance(pos_channel, ZmoPositionChannel):
-                self._apply_position_channel(action, bone_name, pos_channel)
-            
-            if rot_channel and isinstance(rot_channel, ZmoRotationChannel):
-                self._apply_rotation_channel(action, bone_name, rot_channel)
-            
-            scale_channel = channels.get(ZmoChannelType.SCALE)
-            if scale_channel and isinstance(scale_channel, ZmoScaleChannel):
-                self._apply_scale_channel(action, bone_name, scale_channel)
-        
-        print(f"=== End ZMO Animation Debug ===")
-    
-    def _apply_position_channel(self, action, bone_name, channel):
-        """Apply position keyframes to a bone.
-        
-        NO coordinate transformation - use raw ROSE coordinates to match the skeleton.
-        Scale factor is applied (default 0.01 for cm to m).
-        """
-        data_path = f'pose.bones["{bone_name}"].location'
-        
-        fcurves = []
-        for i in range(3):
-            fcurve = action.fcurves.find(data_path, index=i)
-            if not fcurve:
-                fcurve = action.fcurves.new(data_path, index=i)
-            fcurves.append(fcurve)
-        
-        for frame_idx, pos in enumerate(channel.values):
-            frame = self.start_frame + frame_idx
-            
-            # Use raw ROSE coordinates (no transform) to match skeleton
-            x = pos.x * self.scale_factor
-            y = pos.y * self.scale_factor
-            z = pos.z * self.scale_factor
-            
-            fcurves[0].keyframe_points.insert(frame, x)
-            fcurves[1].keyframe_points.insert(frame, y)
-            fcurves[2].keyframe_points.insert(frame, z)
-    
-    def _apply_rotation_channel(self, action, bone_name, channel):
-        """Apply rotation keyframes to a bone.
-        
-        NO coordinate transformation - use raw ROSE coordinates to match the skeleton.
-        """
-        data_path = f'pose.bones["{bone_name}"].rotation_quaternion'
-        
-        fcurves = []
-        for i in range(4):
-            fcurve = action.fcurves.find(data_path, index=i)
-            if not fcurve:
-                fcurve = action.fcurves.new(data_path, index=i)
-            fcurves.append(fcurve)
-        
-        for frame_idx, quat in enumerate(channel.values):
-            frame = self.start_frame + frame_idx
-            
-            # Use raw ROSE quaternion (no transform) to match skeleton
-            # mathutils Quaternion expects (w, x, y, z)
-            w = quat.w
-            x = quat.x
-            y = quat.y
-            z = quat.z
-            
-            # Normalize
-            length = (w*w + x*x + y*y + z*z) ** 0.5
-            if length > 0:
-                w /= length
-                x /= length
-                y /= length
-                z /= length
-            
-            fcurves[0].keyframe_points.insert(frame, w)
-            fcurves[1].keyframe_points.insert(frame, x)
-            fcurves[2].keyframe_points.insert(frame, y)
-            fcurves[3].keyframe_points.insert(frame, z)
-    
-    def _apply_scale_channel(self, action, bone_name, channel):
-        """Apply scale keyframes to a bone."""
-        data_path = f'pose.bones["{bone_name}"].scale'
-        
-        fcurves = []
-        for i in range(3):
-            fcurve = action.fcurves.find(data_path, index=i)
-            if not fcurve:
-                fcurve = action.fcurves.new(data_path, index=i)
-            fcurves.append(fcurve)
-        
-        for frame_idx, scale in enumerate(channel.values):
-            frame = self.start_frame + frame_idx
-            
-            fcurves[0].keyframe_points.insert(frame, scale)
-            fcurves[1].keyframe_points.insert(frame, scale)
-            fcurves[2].keyframe_points.insert(frame, scale)
+        if zmd is None:
+            self.report({'INFO'},
+                "ZMO: no source ZMD found - deriving rest frames from the "
+                "armature. For best results import the mesh via "
+                "'ROSE Mesh with Skeleton' or set 'Source Armature (.zmd)'.")
+            zmd = self._pseudo_zmd_from_armature(armature_obj)
+        self._apply_animation_matrix(armature_obj, action, fcurve_store, zmo, zmd)
 
 
 def menu_func_import(self, context):

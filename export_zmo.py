@@ -42,6 +42,42 @@ def _pack_f32(*v):
     return struct.pack('<' + 'f' * len(v), *v)
 
 
+def _select_frame_events(src_events, src_interval, num_frames):
+    """Choose extended-block (3ZMO) frame events + interval for export.
+
+    Returns (events, interval_ms, restored) where restored is True when the
+    stashed source events matched the exported frame count. Pure function so
+    it can be unit-tested without Blender.
+    """
+    if src_events is not None and len(src_events) == num_frames:
+        events = [int(v) & 0xFFFF for v in src_events]
+        try:
+            interval = int(src_interval)
+        except (TypeError, ValueError):
+            interval = 500
+        return events, interval, True
+    return [0] * num_frames, 500, False
+
+
+def _action_fcurves(action, armature):
+    """F-Curves of the action for the armature's assigned slot.
+
+    On Blender 4.4+ animation lives in per-slot channelbags; the legacy
+    action.fcurves proxy only exposes the first slot, so prefer the
+    channelbag of the armature's own slot when available.
+    """
+    try:
+        slot = armature.animation_data.action_slot
+    except AttributeError:
+        slot = None
+    if slot is not None:
+        try:
+            return action.layers[0].strips[0].channelbag(slot).fcurves
+        except (AttributeError, IndexError, TypeError, RuntimeError):
+            pass
+    return action.fcurves
+
+
 class ExportZMO(bpy.types.Operator, ExportHelper):
     """Export the active armature's action as a ROSE Online ZMO animation"""
     bl_idname = "rose.export_zmo"
@@ -50,7 +86,7 @@ class ExportZMO(bpy.types.Operator, ExportHelper):
 
     filename_ext = ".zmo"
     filter_glob: StringProperty(
-        default="*.zmo",
+        default="*.zmo;*.ZMO",
         options={"HIDDEN"}
     )
 
@@ -85,7 +121,11 @@ class ExportZMO(bpy.types.Operator, ExportHelper):
             return {'CANCELLED'}
 
         zmd = ZMD(str(bpy.path.abspath(zmd_path)))
+        # Engine joint list chains dummies after bones, so dummy joints get
+        # indices len(bones)+i (matches the ZMO importer mapping).
         bone_index_by_name = {b.name: i for i, b in enumerate(zmd.bones)}
+        bone_index_by_name.update(
+            {d.name: len(zmd.bones) + i for i, d in enumerate(zmd.dummies)})
 
         if self.use_action_range:
             start, end = int(round(action.frame_range[0])), int(round(action.frame_range[1]))
@@ -97,13 +137,17 @@ class ExportZMO(bpy.types.Operator, ExportHelper):
         num_frames = end - start + 1
         fps = context.scene.render.fps
 
-        # Bones touched by the action (any of loc / rot / scale fcurves)
+        # Bones touched by the action (any of loc / rot / scale fcurves).
+        # On Blender 4.4+ the curves live in the channelbag of the
+        # armature's assigned slot; fall back to the legacy proxy.
+        fcurves_src = _action_fcurves(action, arm)
         animated = []
-        for fc in action.fcurves:
+        for fc in fcurves_src:
             dp = fc.data_path
             if dp.startswith('pose.bones'):
-                name = dp.split('"')[1]
-                if name not in animated:
+                parts = dp.split('"')
+                name = parts[1] if len(parts) > 1 else None
+                if name and name not in animated:
                     animated.append(name)
         missing = [n for n in animated if n not in bone_index_by_name]
         for n in missing:
@@ -187,12 +231,24 @@ class ExportZMO(bpy.types.Operator, ExportHelper):
                     s = scale_data[name][fi]
                     out += _pack_f32((s.x + s.y + s.z) / 3.0)
 
-        # Extended block (3ZMO): one neutral frame event per frame + interval
+        # Extended block (3ZMO): frame events + interpolation interval.
+        # Restored from the action when the importer stashed them (or any
+        # matching-length source) so re-exports keep combat timing; the
+        # engine reads per-frame events via ZmoAsset.frame_events.
+        src_events = action.get("zmo_frame_events")
+        src_interval = action.get("zmo_interp_ms")
+        events, interval, restored = _select_frame_events(
+            list(src_events) if src_events is not None else None,
+            src_interval, num_frames)
+        if not restored and src_events is not None:
+            self.report({'INFO'},
+                "Stored frame events don't match exported frame count; "
+                "writing neutral events")
         ext_offset = len(out)
-        out += _pack_u16(num_frames)
-        for _ in range(num_frames):
-            out += _pack_u16(0)
-        out += _pack_u32(500)
+        out += _pack_u16(len(events))
+        for ev in events:
+            out += _pack_u16(ev)
+        out += _pack_u32(interval)
         out += _pack_u32(ext_offset)
         out += b"3ZMO"
 

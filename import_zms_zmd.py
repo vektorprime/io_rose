@@ -185,54 +185,112 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
         
         return obj
     
+    def _zmd_entries(self, zmd):
+        """Flattened (name, parent, pos, rot) list: bones then dummies.
+
+        Dummy parents index into the bone array (dummies are appended after
+        bones in the engine joint list), so out-of-range dummy parents fall
+        back to root with a warning.
+        """
+        entries = []
+        for rose_bone in zmd.bones:
+            entries.append((rose_bone.name, rose_bone.parent_id,
+                            bmath.Vector(rose_bone.position.as_tuple()),
+                            bmath.Quaternion(rose_bone.rotation.as_tuple(w_first=True))))
+        n_bones = len(zmd.bones)
+        for dummy in zmd.dummies:
+            parent = dummy.parent_id
+            if parent < 0 or parent >= n_bones:
+                self.report({'WARNING'},
+                    f"Invalid parent ID {dummy.parent_id} for dummy {dummy.name}; "
+                    f"attaching to root")
+                parent = -1
+            entries.append((dummy.name, parent,
+                            bmath.Vector(dummy.position.as_tuple()),
+                            bmath.Quaternion(dummy.rotation.as_tuple(w_first=True))))
+        return entries
+
+    def _world_transforms(self, zmd):
+        """Compose world transforms, independent of bone order in the file.
+
+        The ZMD format imposes no parent-before-child ordering, so parents
+        are resolved iteratively instead of assuming parent_id < idx.
+        Invalid bone parents fall back to root with a warning; parent cycles
+        attach to root rather than failing the whole import.
+        """
+        entries = self._zmd_entries(zmd)
+        n_bones = len(zmd.bones)
+        world_positions = [bmath.Vector((0.0, 0.0, 0.0)) for _ in entries]
+        world_rotations = [bmath.Quaternion((1.0, 0.0, 0.0, 0.0)) for _ in entries]
+
+        def valid_parent(idx, parent):
+            limit = n_bones if idx >= n_bones else len(entries)
+            return parent is not None and 0 <= parent < limit and parent != idx
+
+        resolved = set()
+        for idx, (_name, parent, pos, rot) in enumerate(entries):
+            if parent == -1 or not valid_parent(idx, parent):
+                if parent != -1 and parent is not None:
+                    self.report({'WARNING'},
+                        f"Invalid parent ID {parent} for bone {_name}; "
+                        f"attaching to root")
+                world_positions[idx] = pos
+                world_rotations[idx] = rot
+                resolved.add(idx)
+
+        remaining = set(range(len(entries))) - resolved
+        while remaining:
+            progress = False
+            for idx in list(remaining):
+                _name, parent, pos, rot = entries[idx]
+                if valid_parent(idx, parent) and parent in resolved:
+                    world_positions[idx] = world_positions[parent] + (world_rotations[parent] @ pos)
+                    world_rotations[idx] = world_rotations[parent] @ rot
+                    resolved.add(idx)
+                    remaining.discard(idx)
+                    progress = True
+            if not progress:
+                for idx in list(remaining):
+                    _name, _parent, pos, rot = entries[idx]
+                    self.report({'WARNING'},
+                        f"Parent cycle involving bone {_name}; attaching to root")
+                    world_positions[idx] = pos
+                    world_rotations[idx] = rot
+                    resolved.add(idx)
+                    remaining.discard(idx)
+
+        return entries, world_positions, world_rotations
+
     def _bones_from_zmd(self, zmd, armature):
-        """Create Blender bones from ZMD bone data.
+        """Create Blender bones from ZMD bone + dummy data.
 
         Note: a Blender bone only stores direction + roll (5 DOF) while ZMD
         gives a full 3-DOF rotation, so placing the tail along the rest Y axis
         fixes 2 of the 3.  The remaining roll is set in _align_rest_to_zmd.
+        Dummies are real bones (the engine chains them after the bones and
+        parents attachments/effects to them), so ZMO channels and weights
+        that target dummy joints keep working.
         """
+        entries, world_positions, world_rotations = self._world_transforms(zmd)
+
         # Create all bones first
-        for rose_bone in zmd.bones:
-            bone = armature.edit_bones.new(rose_bone.name)
+        for (name, _parent, _pos, _rot) in entries:
+            bone = armature.edit_bones.new(name)
             bone.use_connect = False
-        
-        # Build world transforms
-        world_positions = []
-        world_rotations = []
-        
-        for idx, rose_bone in enumerate(zmd.bones):
-            pos = bmath.Vector(rose_bone.position.as_tuple())
-            rot = bmath.Quaternion(rose_bone.rotation.as_tuple(w_first=True))
-            
-            if rose_bone.parent_id == -1:
-                world_positions.append(pos)
-                world_rotations.append(rot)
-            else:
-                parent_pos = world_positions[rose_bone.parent_id]
-                parent_rot = world_rotations[rose_bone.parent_id]
-                world_pos = parent_pos + (parent_rot @ pos)
-                world_rot = parent_rot @ rot
-                world_positions.append(world_pos)
-                world_rotations.append(world_rot)
-        
+
         # Set bone positions and parenting
-        for idx, rose_bone in enumerate(zmd.bones):
+        for idx, (_name, parent, _pos, _rot) in enumerate(entries):
             bone = armature.edit_bones[idx]
             world_pos = world_positions[idx]
             world_rot = world_rotations[idx]
-            
-            if rose_bone.parent_id == -1:
-                bone.head = world_pos
-                bone.tail = world_pos + (world_rot @ bmath.Vector((0, 0.1, 0)))
-                if self.keep_root_bone and bone.length < 0.0001:
+
+            if parent != -1 and 0 <= parent < len(armature.edit_bones):
+                bone.parent = armature.edit_bones[parent]
+            bone.head = world_pos
+            bone.tail = world_pos + (world_rot @ bmath.Vector((0, 0.1, 0)))
+            if bone.length < 0.001:
+                if parent == -1 and self.keep_root_bone:
                     bone.tail = bone.head + bmath.Vector((0, 0.1, 0))
-            else:
-                if rose_bone.parent_id >= len(armature.edit_bones):
-                    continue
-                bone.parent = armature.edit_bones[rose_bone.parent_id]
-                bone.head = world_pos
-                bone.tail = world_pos + (world_rot @ bmath.Vector((0, 0.1, 0)))
                 if bone.length < 0.001:
                     bone.tail = bone.head + bmath.Vector((0, 0.001, 0))
 
@@ -243,37 +301,25 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
         with an implicit roll=0 base frame.  Reading back the evaluated
         matrix_local after the first pass gives that actual base frame, so the
         required roll is the signed angle around the bone's Y axis from the
-        base X axis to the ZMD rest X axis.
+        base X axis to the ZMD rest X axis. Covers bones and dummies alike.
 
         This alignment is critical and its failure is silent: Blender deforms
         skinned meshes with pose @ rest^-1 while the engine uses
         pose @ ZMD_bind^-1.  A mismatched rest still looks correct at rest
         (the ratio is identity for ANY rest) but corrupts every animated pose.
         """
-        world_positions = []
-        world_rotations = []
-        for idx, rose_bone in enumerate(zmd.bones):
-            pos = bmath.Vector(rose_bone.position.as_tuple())
-            rot = bmath.Quaternion(rose_bone.rotation.as_tuple(w_first=True))
-            if rose_bone.parent_id == -1 or rose_bone.parent_id >= len(zmd.bones):
-                world_positions.append(pos)
-                world_rotations.append(rot)
-            else:
-                parent_pos = world_positions[rose_bone.parent_id]
-                parent_rot = world_rotations[rose_bone.parent_id]
-                world_positions.append(parent_pos + (parent_rot @ pos))
-                world_rotations.append(parent_rot @ rot)
+        entries, world_positions, world_rotations = self._world_transforms(zmd)
 
         bones = armature_obj.data.bones
         rolls = {}
-        for idx, rose_bone in enumerate(zmd.bones):
-            bone = bones.get(rose_bone.name)
+        for idx, (name, parent, _pos, _rot) in enumerate(entries):
+            bone = bones.get(name)
             if bone is None:
                 continue
-            if rose_bone.parent_id == -1 or rose_bone.parent_id >= len(zmd.bones):
+            if parent == -1 or parent < 0 or parent >= len(entries):
                 parent_local = bmath.Matrix.Identity(4)
             else:
-                pb = bones.get(zmd.bones[rose_bone.parent_id].name)
+                pb = bones.get(entries[parent][0])
                 parent_local = pb.matrix_local if pb else bmath.Matrix.Identity(4)
             # Desired local rotation (ZMD), and actual local frame at roll=0
             desired = parent_local.to_3x3().inverted() @ world_rotations[idx].to_matrix()
@@ -365,26 +411,53 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
                 v = zms.vertices[vi].uv4.y
                 mesh.uv_layers["uv4"].data[loop_idx].uv = (u, 1 - v)
         
+        # Vertex colors (matches ZmsFile.color / client MESH_ATTRIBUTE_COLOR).
+        # Stored as a POINT-domain color attribute so the exporter can
+        # round-trip them; without this, re-export writes white instead of
+        # the original tint.
+        if zms.colors_enabled():
+            try:
+                color_attr = mesh.color_attributes.new(
+                    name="Color", type='FLOAT_COLOR', domain='POINT')
+                for vi, v in enumerate(zms.vertices):
+                    if vi < len(color_attr.data):
+                        color_attr.data[vi].color = (
+                            v.color.r, v.color.g, v.color.b, v.color.a)
+            except Exception as e:
+                self.report({'WARNING'}, f"Could not import vertex colors: {e}")
+
         # Material with texture
         mat = bpy.data.materials.new(filename)
         mat.use_nodes = True
-        
+
         nodes = mat.node_tree.nodes
         mat_node = nodes["Principled BSDF"]
         tex_node = nodes.new(type="ShaderNodeTexImage")
-        
+
+        texture_loaded = False
         if self.load_texture:
             # Find the ZMS file path for texture lookup
             zms_path = Path(self.filepath).parent / f"{filename}.zms"
             for ext in self.texture_extensions:
                 p = zms_path.with_suffix(ext)
                 if p.is_file():
-                    image = bpy.data.images.load(str(p))
-                    tex_node.image = image
-                    break
-        
-        links = mat.node_tree.links
-        links.new(tex_node.outputs["Color"], mat_node.inputs["Base Color"])
+                    try:
+                        image = bpy.data.images.load(str(p), check_existing=True)
+                        tex_node.image = image
+                        texture_loaded = True
+                        break
+                    except Exception as e:
+                        self.report({'WARNING'},
+                            f"Could not load texture {p.name}: {e}")
+                        continue
+
+        # Only link the texture when an image actually loaded; otherwise the
+        # material renders black with no indication of why.
+        if texture_loaded:
+            links = mat.node_tree.links
+            links.new(tex_node.outputs["Color"], mat_node.inputs["Base Color"])
+        else:
+            nodes.remove(tex_node)
         mesh.materials.append(mat)
         
         mesh.update(calc_edges=True)

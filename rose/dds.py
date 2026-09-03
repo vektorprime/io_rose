@@ -49,26 +49,26 @@ def write_dds_rgba8(filepath, width, height, rgba_bytes):
 
     flags = (DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PITCH |
              DDSD_PIXELFORMAT)
-    header = struct.pack(
-        "<4s7I", b"DDS ", 124,
-        flags,
-        height, width, width * 4, 0, 0, 0)
-
     pf_flags = DDPF_RGB | DDPF_ALPHAPIXELS
-    # DDS_PIXELFORMAT: size, flags, fourcc, rgb bit count, 4 channel masks
-    pixel_format = struct.pack("<I", PIXEL_FORMAT_SIZE)
-    pixel_format += struct.pack("<I", pf_flags)
-    pixel_format += struct.pack("<I", 0)
-    pixel_format += struct.pack("<I", 32)
-    pixel_format += struct.pack("<IIII", 0x00FF0000, 0x0000FF00,
-                                0x000000FF, 0xFF000000)
 
-    caps = DDSCAPS_TEXTURE
-    caps_header = struct.pack("<I", caps)
-    caps_header += struct.pack("<IIIII", 0, 0, 0, 0, 0)
+    # Full 128-byte file layout: 4-byte magic + 124-byte DDS_HEADER.
+    # The header is: dwSize, dwFlags, dwHeight, dwWidth, dwPitch, dwDepth,
+    # dwMipMapCount, dwReserved1[11], DDS_PIXELFORMAT (8 dwords: dwSize,
+    # dwFlags, dwFourCC, dwRGBBitCount, dwRMask, dwGMask, dwBMask, dwAMask),
+    # dwCaps, dwCaps2, dwCaps3, dwCaps4, dwReserved2.
+    # Field offsets must match what readers expect (cf. client's
+    # dds_image_loader.rs: pixel format at header offset 72, caps at 104).
+    # An earlier version of this writer omitted dwReserved1, producing an
+    # 88-byte header whose fields landed at the wrong offsets.
+    header = struct.pack(
+        "<4s31I", b"DDS ", 124,
+        flags,
+        height, width, width * 4, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  # dwReserved1[11]
+        PIXEL_FORMAT_SIZE, pf_flags, 0, 32,
+        0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000,
+        DDSCAPS_TEXTURE, 0, 0, 0, 0)
 
     with open(filepath, "wb") as f:
         f.write(header)
-        f.write(pixel_format)
-        f.write(caps_header)
         f.write(bgra)

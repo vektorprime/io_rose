@@ -1,3 +1,4 @@
+import struct
 from enum import IntEnum
 from .utils import *
 
@@ -12,6 +13,38 @@ class VertexFlags(IntEnum):
     UV2 = 256         # (1 << 8)
     UV3 = 512         # (1 << 9)
     UV4 = 1024        # (1 << 10)
+
+# Bitmask of all known vertex-format flags (matches ZmsFormatFlags in
+# rose-file-readers/src/zms.rs). Any other bit means a corrupt or
+# forward-incompatible file and must be rejected, not silently accepted.
+_KNOWN_FORMAT_BITS = (VertexFlags.POSITION | VertexFlags.NORMAL |
+                      VertexFlags.COLOR | VertexFlags.BONE_WEIGHT |
+                      VertexFlags.BONE_INDEX | VertexFlags.TANGENT |
+                      VertexFlags.UV1 | VertexFlags.UV2 |
+                      VertexFlags.UV3 | VertexFlags.UV4)
+
+
+def _check_format_bits(flags, report_func=None):
+    unknown = flags & ~int(_KNOWN_FORMAT_BITS)
+    if unknown:
+        raise ValueError(f"Invalid ZMS format bits: {flags:#X} "
+                         f"(unknown bits {unknown:#X})")
+
+
+def _resolve_bone_index(bone_table, idx):
+    """Map a per-vertex bone slot through the bone table.
+
+    Matches rose-file-readers/src/zms.rs which returns
+    Err(InvalidBoneIndex) for out-of-range slots instead of silently
+    substituting bone 0 (which would attach vertices to the wrong bone).
+    """
+    try:
+        return bone_table[idx]
+    except IndexError:
+        raise ValueError(
+            f"Invalid bone index {idx} "
+            f"(bone table has {len(bone_table)} entries)") from None
+
 
 class Vertex:
     def __init__(self):
@@ -98,6 +131,12 @@ class ZMS:
         elif self.identifier == "ZMS0008":
             self.version = 8
             self._read_version8(f, 8)
+        elif self.identifier == "ZMS0009":
+            # Same layout as version 8, but vertex/triangle counts and
+            # indices are u32 instead of u16 (large meshes).
+            # Matches rose-file-readers/src/zms.rs read().
+            self.version = 9
+            self._read_version8(f, 9)
         else:
             raise ValueError(f"Unsupported ZMS version: {self.identifier}")
 
@@ -107,6 +146,7 @@ class ZMS:
         Version 5/6 use uint32 for counts and indices
         """
         self.flags = read_u32(f)  # int vertex_format
+        _check_format_bits(self.flags)
         self.bounding_box_min = read_vector3_f32(f)  # vec3
         self.bounding_box_max = read_vector3_f32(f)  # vec3
 
@@ -154,9 +194,10 @@ class ZMS:
                 _ = read_u32(f)  # vertex_id (uint32)
                 self.vertices[i].bone_weights = read_list_f32(f, 4)  # vec4 (4x float)
                 bone_indices_raw = read_list_u32(f, 4)  # vec4 stored as uint32 in file
-                # Map through bone table (indices into bone_table)
+                # Map through bone table (indices into bone_table).
+                # Out-of-range slots raise instead of silently using bone 0.
                 self.vertices[i].bone_indices = [
-                    bone_table[idx] if idx < len(bone_table) else 0
+                    _resolve_bone_index(bone_table, idx)
                     for idx in bone_indices_raw
                 ]
 
@@ -207,11 +248,14 @@ class ZMS:
         self.bones = bone_table
 
     def _read_version8(self, f, version):
-        """Read ZMS version 7 or 8 format
-        
-        Version 7/8 use uint16 for counts and indices (matches C++ uint16)
+        """Read ZMS version 7, 8 or 9 format
+
+        Version 7/8 use uint16 for counts and indices (matches C++ uint16).
+        Version 9 uses u32 vertex/triangle counts and u32 indices for
+        large meshes (matches rose-file-readers/src/zms.rs read_version8).
         """
         self.flags = read_u32(f)  # int vertex_format (still u32 in file)
+        _check_format_bits(self.flags)
         self.bounding_box_min = read_vector3_f32(f)  # vec3
         self.bounding_box_max = read_vector3_f32(f)  # vec3
 
@@ -220,7 +264,11 @@ class ZMS:
         for i in range(bone_count):
             self.bones.append(read_u16(f))  # uint16 bone_indices[i]
 
-        vert_count = read_u16(f)  # uint16 (matches C++ num_verts)
+        large = version >= 9
+        if large:
+            vert_count = read_u32(f)  # u32 for large meshes
+        else:
+            vert_count = read_u16(f)  # uint16 (matches C++ num_verts)
         
         # Validate vertex count (uint16 max is 65535, but we warn at high values)
         if vert_count > 50000:
@@ -246,9 +294,10 @@ class ZMS:
             for i in range(vert_count):
                 self.vertices[i].bone_weights = read_list_f32(f, 4)  # vec4 (4x float)
                 bone_indices_raw = read_list_u16(f, 4)  # vec4 stored as uint16 in file
-                # Map through bones list - indices are into bones array
+                # Map through bones list - indices are into bones array.
+                # Out-of-range slots raise instead of silently using bone 0.
                 self.vertices[i].bone_indices = [
-                    self.bones[idx] if idx < len(self.bones) else 0
+                    _resolve_bone_index(self.bones, idx)
                     for idx in bone_indices_raw
                 ]
 
@@ -272,9 +321,13 @@ class ZMS:
             for i in range(vert_count):
                 self.vertices[i].uv4 = read_vector2_f32(f)  # vec2
 
-        # Read indices - flat array (usvec3 = 3x uint16)
-        index_count = read_u16(f)  # uint16 num_faces (matches C++)
-        indices_flat = read_list_u16(f, index_count * 3)  # uint16 indices
+        # Read indices - flat array (usvec3 = 3x uint16, u32 for v9 large)
+        if large:
+            index_count = read_u32(f)  # u32 num_faces for large meshes
+            indices_flat = read_list_u32(f, index_count * 3)  # u32 indices
+        else:
+            index_count = read_u16(f)  # uint16 num_faces (matches C++)
+            indices_flat = read_list_u16(f, index_count * 3)  # uint16 indices
         for i in range(0, len(indices_flat), 3):
             self.indices.append(Vector3(indices_flat[i], indices_flat[i+1], indices_flat[i+2]))
 
@@ -286,6 +339,12 @@ class ZMS:
         strip_count = read_u16(f)  # uint16 count
         self.strips = read_list_u16(f, strip_count)  # uint16 array (ibuf_strip)
 
-        # Read pool (version 8 only)
+        # Read pool (version 8+). The trailing pool bytes may be absent on
+        # some valid files, so tolerate EOF here instead of crashing.
+        # Matches rose-file-readers/src/zms.rs which discards the read Result.
         if version >= 8:
-            self.pool = read_u16(f)  # uint16
+            pool_bytes = f.read(2)
+            if len(pool_bytes) == 2:
+                self.pool = struct.unpack("<H", pool_bytes)[0]  # uint16
+            else:
+                self.pool = 0
