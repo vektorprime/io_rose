@@ -1,7 +1,8 @@
 """End-to-end terrain build on real zone data.
 
-Rebuilds the full terrain mesh (vertices + main quads + inter-tile stitch
-faces) using the same logic as import_map.py and validates that:
+Rebuilds the full terrain mesh (vertices + main quads, no inter-tile stitch
+faces - tiles abut exactly and the client spawns separate blocks) using the
+same logic as import_map.py and validates that:
 - no crashes on sparse maps (missing neighbor tiles),
 - every face references valid vertex indices,
 - per-tile face counts stay aligned,
@@ -31,10 +32,13 @@ ZONE_DIR = os.environ.get(
 def build_terrain(force_missing=None):
     """Vertex + face generation mirroring import_map.py execute()."""
     coords = []
+    him_files = {}
     for file in sorted(os.listdir(ZONE_DIR)):
-        if file.endswith(".HIM"):
+        # Case-insensitive: data files use uppercase .HIM
+        if file.upper().endswith(".HIM"):
             x, y = map(int, file.split(".")[0].split("_"))
             coords.append((x, y))
+            him_files[(x, y)] = file
     minx = min(c[0] for c in coords)
     maxx = max(c[0] for c in coords)
     miny = min(c[1] for c in coords)
@@ -52,14 +56,20 @@ def build_terrain(force_missing=None):
         nx, ny = x - minx, y - miny
         if force_missing and (x, y) == force_missing:
             continue
-        him = Him(os.path.join(ZONE_DIR, f"{x}_{y}.HIM"))
-        him.indices = list_2d(him.width, him.length)
+        him = Him(os.path.join(ZONE_DIR, him_files[(x, y)]))
+        # Row-major [length rows][width cols] (heights[vy][vx] below).
+        him.indices = list_2d(him.length, him.width)
         tiles.hims[ny][nx] = him
-        tiles.indices[ny][nx] = list_2d(him.width, him.length)
+        tiles.indices[ny][nx] = list_2d(him.length, him.width)
 
-    grid_scale = 2.5
+    # Per-quad scale from the data (patch_scale cm per 100 quads), not a
+    # hardcoded 2.5; the world origin is the fixed -5200 m ROSE offset.
+    first_him = next(h for h in
+                     (tiles.hims[ny][nx] for ny in range(dimy) for nx in range(dimx))
+                     if h is not None)
+    grid_scale = (first_him.patch_scale / 100.0) if first_him.patch_scale else 2.5
     block_size = 64.0 * grid_scale
-    world_origin = -32.5 * block_size
+    world_origin = -5200.0
     vertices, edges, faces = [], [], []
     xs, ys = [], []
 
@@ -91,51 +101,8 @@ def build_terrain(force_missing=None):
                         edges += ((v1, v2), (v2, v3), (v3, v4), (v4, v1))
                         faces.append((v1, v2, v3, v4))
 
-    # Inter-tile stitch faces (mirrors import_map.py, sparse-safe)
-    for y in range(tiles.dimension.y):
-        for x in range(tiles.dimension.x):
-            if not tiles.hims[y][x] or not tiles.indices[y][x]:
-                continue
-            indices = tiles.indices[y][x]
-            him = tiles.hims[y][x]
-            is_x_edge = (x == tiles.dimension.x - 1)
-            is_y_edge = (y == tiles.dimension.y - 1)
-            has_x_neighbor = not is_x_edge and bool(tiles.indices[y][x + 1])
-            has_y_neighbor = not is_y_edge and bool(tiles.indices[y + 1][x])
-            has_xy_neighbor = has_x_neighbor and has_y_neighbor and bool(tiles.indices[y + 1][x + 1])
-            for vy in range(him.length):
-                for vx in range(him.width):
-                    is_x_edge_vertex = (vx == him.width - 1) and (vy < him.length - 1)
-                    is_y_edge_vertex = (vx < him.width - 1) and (vy == him.length - 1)
-                    is_corner_vertex = (vx == him.width - 1) and (vy == him.length - 1)
-                    if has_x_neighbor and is_x_edge_vertex:
-                        next_indices = tiles.indices[y][x + 1]
-                        v1 = indices[vy][vx]
-                        v2 = next_indices[vy][0]
-                        v3 = next_indices[vy + 1][0]
-                        v4 = indices[vy + 1][vx]
-                        edges += ((v1, v2), (v2, v3), (v3, v4), (v4, v1))
-                        faces.append((v1, v2, v3, v4))
-                    if has_y_neighbor and is_y_edge_vertex:
-                        next_indices = tiles.indices[y + 1][x]
-                        v1 = indices[vy][vx]
-                        v2 = indices[vy][vx + 1]
-                        v3 = next_indices[0][vx + 1]
-                        v4 = next_indices[0][vx]
-                        edges += ((v1, v2), (v2, v3), (v3, v4), (v4, v1))
-                        faces.append((v1, v2, v3, v4))
-                    if has_xy_neighbor and is_corner_vertex:
-                        right = tiles.indices[y][x + 1]
-                        diag = tiles.indices[y + 1][x + 1]
-                        down = tiles.indices[y + 1][x]
-                        diag_him = tiles.hims[y + 1][x + 1]
-                        down_him = tiles.hims[y + 1][x]
-                        v1 = indices[vy][vx]
-                        v2 = right[diag_him.length - 1][0]
-                        v3 = diag[0][0]
-                        v4 = down[0][down_him.width - 1]
-                        edges += ((v1, v2), (v2, v3), (v3, v4), (v4, v1))
-                        faces.append((v1, v2, v3, v4))
+    # No inter-tile stitch faces (mirrors import_map.py): tiles abut
+    # exactly in world space, so stitched quads would be degenerate.
 
     max_vi = len(vertices) - 1
     for f in faces:
@@ -148,16 +115,21 @@ def main():
     print(f"all tiles present: vertices={nv} faces={nf}")
     print(f"x range [{x0:.1f}, {x1:.1f}] y range [{y0:.1f}, {y1:.1f}]")
 
-    # JDT01 reference: tiles 31_30..34_33 -> x [-240, 400], y [-400, 240]
+    # JDT01 reference: 16 tiles x 65x65 verts, 16 x 64x64 quads;
+    # tiles 31_30..34_33 -> x [-240, 400], y [-400, 240]
+    assert nv == 16 * 65 * 65, f"expected {16 * 65 * 65} vertices, got {nv}"
+    assert nf == 16 * 64 * 64, f"expected {16 * 64 * 64} faces, got {nf}"
     assert abs(x0 - (-240.0)) < 0.01, f"west edge {x0} != -240"
     assert abs(x1 - 400.0) < 0.01, f"east edge {x1} != 400"
     assert abs(y0 - (-400.0)) < 0.01, f"south edge {y0} != -400"
     assert abs(y1 - 240.0) < 0.01, f"north edge {y1} != 240"
 
-    # Sparse map: a missing tile must not crash and must produce fewer faces
+    # Sparse map: a missing tile must not crash and must drop exactly one
+    # tile of geometry (stitch faces used to make this fuzzy).
     nv2, nf2, *_ = build_terrain(force_missing=(33, 31))
     print(f"33_31 forced missing: vertices={nv2} faces={nf2}")
-    assert nv2 < nv and nf2 < nf, "missing tile did not reduce mesh"
+    assert nv2 == nv - 65 * 65, f"expected {nv - 65 * 65} vertices, got {nv2}"
+    assert nf2 == nf - 64 * 64, f"expected {nf - 64 * 64} faces, got {nf2}"
 
     print("\nTERRAIN BUILD OK (coordinates match Rust client)")
     return 0

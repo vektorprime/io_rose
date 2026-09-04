@@ -246,6 +246,18 @@ class Ifo:
                         obj.interval = read_u32(f)
                         self.sound_objects.append(obj)
 
+                elif block_type in (BlockType.DeprecatedMapInfo,
+                                    BlockType.DeprecatedWater):
+                    # Unparsed legacy blocks: preserved verbatim via
+                    # _raw_blocks and re-emitted on save.
+                    pass
+
+                else:
+                    # The reference rejects unknown block types instead of
+                    # silently dropping them (ifo.rs), so newer/corrupt
+                    # files fail loudly rather than losing data.
+                    raise ValueError(f"Invalid IFO block type {block_type}")
+
             # Bytes after the last block that no header references (kept for
             # lossless round-trips; the parser just stops at EOF). If the
             # last block is an unparsed type, its raw data already covers

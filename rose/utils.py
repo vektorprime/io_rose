@@ -289,15 +289,18 @@ def write_bool(f, value):
     """Write boolean (1 byte)"""
     f.write(struct.pack("<?", value))
 
-def list_2d(width, height, default=None):
-    """Create a 2D list with given dimensions
-    
+def list_2d(rows, cols, default=None):
+    """Create a 2D list with given dimensions (row-major: grid[y][x]).
+
+    Matches the Rust file layouts (til.rs / him.rs flat row-major
+    `data[y * width + x]`): the first dimension is the row count.
+
     Args:
-        width: Number of rows
-        height: Number of columns
+        rows: Number of rows (grid height / length)
+        cols: Number of columns (grid width)
         default: Default value for each element (default: None)
     """
-    return [[default for _ in range(height)] for _ in range(width)]
+    return [[default for _ in range(cols)] for _ in range(rows)]
 
 
 def convert_rose_position_to_blender(x, y, z):
@@ -349,12 +352,18 @@ def apply_uv_rotation(u, v, rotation):
     return (u, v)          # None / Unknown
 
 
+def _clamp_index(v, size):
+    """Clamp a grid index into [0, size - 1] (matches til.rs / him.rs
+    get_clamped, which pin both ends; min() alone lets negatives wrap)."""
+    return max(0, min(v, size - 1))
+
+
 def patch_rotation(til, zon, px, py):
     """Rotation of the TIL patch at (px, py); 1 (None) if unavailable."""
     if not til or not til.tiles:
         return 1
-    til_x = min(px, len(til.tiles[0]) - 1)
-    til_y = min(py, len(til.tiles) - 1)
+    til_x = _clamp_index(px, len(til.tiles[0]))
+    til_y = _clamp_index(py, len(til.tiles))
     patch = til.tiles[til_y][til_x]
     if patch.tile < len(zon.tiles):
         return zon.tiles[patch.tile].rotation
@@ -380,16 +389,18 @@ def texture_pair(til, zon, px, py, texture_count):
     """
     if not til or not til.tiles:
         return None
-    til_x = min(px, len(til.tiles[0]) - 1)
-    til_y = min(py, len(til.tiles) - 1)
+    til_x = _clamp_index(px, len(til.tiles[0]))
+    til_y = _clamp_index(py, len(til.tiles))
     patch = til.tiles[til_y][til_x]
     if patch.tile >= len(zon.tiles):
         return None
     tile = zon.tiles[patch.tile]
     l1 = tile.layer1 + tile.offset1
     l2 = tile.layer2 + tile.offset2
+    # Out-of-range layers fall back to texture 0 (client terrain.rs),
+    # not to the other layer.
     if l1 >= texture_count:
-        l1 = l2
+        l1 = 0
     if l2 >= texture_count:
-        l2 = l1
+        l2 = 0
     return (l1, l2)

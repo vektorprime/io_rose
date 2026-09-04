@@ -26,11 +26,31 @@ ZONE_DIR = os.environ.get(
     _paths.client_zone_dir(),
 )
 
-ZON_FILE = os.path.join(ZONE_DIR, "JDT01.ZON")
-
 # JDT01 reference values (update if testing a different zone)
 EXPECTED_TEXTURES = 29
 EXPECTED_LAST_TEXTURE = "3DData\\Terrain\\Tiles\\Junon\\JD\\S001_09.dds"
+
+
+def _find_zon():
+    """JDT01.ZON by default, else the first .ZON in the zone dir."""
+    cand = os.path.join(ZONE_DIR, "JDT01.ZON")
+    if os.path.isfile(cand):
+        return cand
+    for name in sorted(os.listdir(ZONE_DIR)):
+        if name.upper().endswith(".ZON"):
+            return os.path.join(ZONE_DIR, name)
+    return None
+
+
+def _sibling(base, ext):
+    """Tile sibling file, trying exact then case-insensitive extension."""
+    cand = os.path.join(ZONE_DIR, base + ext)
+    if os.path.isfile(cand):
+        return cand
+    for name in os.listdir(ZONE_DIR):
+        if name.upper() == (base + ext).upper():
+            return os.path.join(ZONE_DIR, name)
+    return cand  # let the parser raise the missing-file error
 
 
 def main():
@@ -39,11 +59,16 @@ def main():
         print("set ROSE_TEST_ZONE to a zone directory")
         return 1
 
+    zon_file = _find_zon()
+    if zon_file is None:
+        print(f"no .ZON file in {ZONE_DIR}")
+        return 1
+
     fail = 0
 
     # ZON + "end" sentinel
     try:
-        zon = Zon(ZON_FILE)
+        zon = Zon(zon_file)
         print(f"ZON: type={zon.zone_type} grid={zon.width}x{zon.length} "
               f"grid_size={zon.grid_size} tiles={len(zon.tiles)} textures={len(zon.textures)}")
         assert "end" not in zon.textures, "texture list still contains 'end' sentinel"
@@ -59,7 +84,8 @@ def main():
         traceback.print_exc()
         fail += 1
 
-    # HIM/TIL/IFO per tile
+    # HIM/TIL/IFO per tile (sibling extensions resolved case-insensitively:
+    # data files use uppercase .TIL/.IFO while code may pass lowercase)
     parsed = 0
     for name in sorted(os.listdir(ZONE_DIR)):
         if not name.upper().endswith(".HIM"):
@@ -67,8 +93,8 @@ def main():
         base = name[:-4]
         try:
             him = Him(os.path.join(ZONE_DIR, name))
-            til = Til(os.path.join(ZONE_DIR, base + ".TIL"))
-            ifo = Ifo(os.path.join(ZONE_DIR, base + ".IFO"))
+            til = Til(_sibling(base, ".TIL"))
+            ifo = Ifo(_sibling(base, ".IFO"))
             parsed += 1
             print(f"  {name}: HIM {him.width}x{him.length} maxh={him.max_height:.1f}, "
                   f"TIL {len(til.tiles)}x{len(til.tiles[0])}, "

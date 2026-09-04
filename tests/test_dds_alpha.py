@@ -30,6 +30,11 @@ def decode_dxt3(path):
         data = f.read()
     assert data[:4] == b"DDS ", f"{path}: not a DDS file"
     w, h = struct.unpack_from("<II", data, 12)
+    # Pixel-format FourCC at header offset 80 (file offset 84): the block
+    # layout below is only valid for DXT3. Decoding DXT1/DXT5 bytes as DXT3
+    # yields plausible-looking means, so check explicitly.
+    fourcc = data[84:88]
+    assert fourcc == b"DXT3", f"{path}: expected DXT3, got FourCC {fourcc!r}"
     body = data[128:]
     bx, by = w // 4, h // 4
     out = []
@@ -89,12 +94,25 @@ def main():
         # straight-alpha sanity: transparent pixels must not be premultiplied
         # black (premultiplied data would be black where alpha is low)
         low_alpha_black = sum(1 for rgb, a in px if a < 0.1 and sum(rgb) / 3 < 20)
-        status = "OK" if (lo <= mean <= hi) and black_rgb / n < 0.01 else "FAIL"
+        # Spatial layout check: the alpha mass must not concentrate in one
+        # quadrant. A global mean is invariant to nibble/row permutation, so
+        # a scrambled decode would still pass the mean check above.
+        quad_mass = [0.0, 0.0, 0.0, 0.0]
+        for y in range(h):
+            for x in range(w):
+                a = alphas[y * w + x]
+                quad_mass[(y * 2 // h) * 2 + (x * 2 // w)] += a
+        total_mass = sum(quad_mass) or 1.0
+        max_share = max(quad_mass) / total_mass
+        var = sum((a - mean) ** 2 for a in alphas) / n
+        layout_ok = max_share < 0.9 and var > 1e-6
+        status = "OK" if (lo <= mean <= hi) and black_rgb / n < 0.01 and layout_ok else "FAIL"
         if status != "OK":
             fail += 1
         print(f"{name}: {w}x{h} alpha mean={mean:.3f} "
               f"black_rgb={black_rgb} ({100 * black_rgb / n:.2f}%) "
-              f"black@alpha<0.1={low_alpha_black} [{status}]")
+              f"black@alpha<0.1={low_alpha_black} "
+              f"maxquad={max_share:.2f} [{status}]")
 
     if fail:
         print(f"\n{len(CHECKED) - fail}/{len(CHECKED)} passed, {fail} FAILURES")

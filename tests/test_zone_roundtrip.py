@@ -31,9 +31,9 @@ ZONE_DIR = os.environ.get(
 EXTENSIONS = (".ZON", ".HIM", ".TIL", ".IFO")
 
 
-def roundtrip_bytes(parser_cls, path):
+def roundtrip_bytes(parser_cls, path, tmpdir):
     obj = parser_cls(path)
-    tmp = os.path.join(tempfile.mkdtemp(), os.path.basename(path))
+    tmp = os.path.join(tmpdir, os.path.basename(path))
     obj.save(tmp)
     with open(path, "rb") as a, open(tmp, "rb") as b:
         return a.read() == b.read()
@@ -48,20 +48,23 @@ def main():
     fail = 0
     checked = 0
 
-    for name in sorted(os.listdir(ZONE_DIR)):
-        if not name.upper().endswith(EXTENSIONS):
-            continue
-        path = os.path.join(ZONE_DIR, name)
-        parser = {"ZON": Zon, "HIM": Him, "TIL": Til, "IFO": Ifo}[name[-3:].upper()]
-        try:
-            ok = roundtrip_bytes(parser, path)
-            checked += 1
-            if not ok:
-                print(f"  {name}: ROUND-TRIP DIFFERS")
+    # One shared temp dir (auto-removed); the old mkdtemp() per file leaked
+    # a directory per checked file on every run.
+    with tempfile.TemporaryDirectory(prefix="rose_roundtrip_") as tmpdir:
+        for name in sorted(os.listdir(ZONE_DIR)):
+            if not name.upper().endswith(EXTENSIONS):
+                continue
+            path = os.path.join(ZONE_DIR, name)
+            parser = {"ZON": Zon, "HIM": Him, "TIL": Til, "IFO": Ifo}[name[-3:].upper()]
+            try:
+                ok = roundtrip_bytes(parser, path, tmpdir)
+                checked += 1
+                if not ok:
+                    print(f"  {name}: ROUND-TRIP DIFFERS")
+                    fail += 1
+            except Exception as e:
+                print(f"  {name}: FAIL: {e}")
                 fail += 1
-        except Exception as e:
-            print(f"  {name}: FAIL: {e}")
-            fail += 1
 
     if checked == 0:
         print("no zone files found")

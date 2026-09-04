@@ -24,21 +24,26 @@ class Him:
 
     def load(self, filepath):
         with open(filepath, 'rb') as f:
-            self.width = read_i32(f)
-            self.length = read_i32(f)
-            self.grid_count = read_i32(f)
+            self.width = read_u32(f)
+            self.length = read_u32(f)
+            self.grid_count = read_u32(f)
             self.patch_scale = read_f32(f)
-            
-            self.heights = list_2d(self.width, self.length, 0)
+
+            # Row-major [length rows][width cols] (him.rs heights[y*width+x]).
+            self.heights = list_2d(self.length, self.width, 0.0)
+            first = True
             for y in range(self.length):
                 for x in range(self.width):
                     h = read_f32(f)
                     self.heights[y][x] = h
-                    
-                    if h > self.max_height:
+
+                    # Seed from the first sample: 0.0-seeded min/max lies
+                    # about all-positive / all-negative heightmaps.
+                    if first or h > self.max_height:
                         self.max_height = h
-                    if h < self.min_height:
+                    if first or h < self.min_height:
                         self.min_height = h
+                    first = False
 
             self._tail = f.read()
 
@@ -51,9 +56,9 @@ class Him:
         original values are kept when saving a file that was loaded, so
         round-trips stay byte-identical."""
         with open(filepath, 'wb') as f:
-            write_i32(f, self.width)
-            write_i32(f, self.length)
-            write_i32(f, self.grid_count)
+            write_u32(f, self.width)
+            write_u32(f, self.length)
+            write_u32(f, self.grid_count)
             write_f32(f, self.patch_scale)
             for y in range(self.length):
                 for x in range(self.width):

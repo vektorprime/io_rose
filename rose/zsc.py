@@ -1,13 +1,15 @@
 # zsc.py - Rose Online ZSC Scene File Parser (Rust-Exact Match)
+#
+# Pure-Python module (no Blender dependencies) so it can be unit-tested
+# outside Blender. Matches rose-file-readers/src/zsc.rs: unknown values
+# raise instead of being coerced, so corrupt files fail loudly.
 from .utils import *
-from mathutils import Quaternion
+from .utils import decode_string_with_fallback
 
 from enum import IntEnum
 from typing import List, Optional, NamedTuple, Dict, Any
-import bpy
 import os
-from bpy.props import StringProperty, BoolProperty
-from bpy_extras.io_utils import ImportHelper
+import struct
 
 # Debug logging control - disable by default for performance
 ZSC_DEBUG_LOG = False
@@ -27,13 +29,16 @@ class BlendMode(IntEnum):
 
 
 class GlowType(IntEnum):
+    """On-disk glow values (matches zsc.rs ZscMaterialGlow).
+
+    0/1 mean "no glow" (stored as None); 2-5 carry the glow color.
+    """
     NONE = 0
     NOTSET = 1
     SIMPLE = 2
     LIGHT = 3
-    TEXTURE = 4
-    TEXTURELIGHT = 5
-    ALPHA = 6
+    TEXTURELIGHT = 4
+    ALPHA = 5
 
 
 class CollisionType(IntEnum):
@@ -191,10 +196,15 @@ class Zsc:
                         if not b or b == b'\x00':
                             break
                         data.append(b)
-                    return ''.join([chr(b[0]) for b in data])
+                    # UTF-8 first, EUC-KR fallback (matches reader.rs
+                    # decode_string); chr()-per-byte mojibake otherwise.
+                    return decode_string_with_fallback(b''.join(data))
 
                 def read_str_no_null(size):
-                    return f.read(size).decode('utf-8', errors='ignore')
+                    # Fixed-length path: same decoding, trimmed at the
+                    # first null like reader.rs.
+                    return decode_string_with_fallback(
+                        f.read(size)).split('\x00')[0]
                 
                 def read_vec3():
                     return Vec3(*[read_f32() for _ in range(3)])
@@ -231,20 +241,28 @@ class Zsc:
                     mat.z_test_enabled = bool(read_u16())
                     mat.z_write_enabled = bool(read_u16())
 
+                    # File values are 0=Normal, 1=Lighten (zsc.rs
+                    # ZscMaterialBlend); anything else is corrupt, not NONE.
                     blend_mode = read_u16()
-                    mat.blend_mode = BlendMode(blend_mode) if blend_mode in [0, 1, 2, 3] else BlendMode.NONE
                     if blend_mode == 0:
                         mat.blend_mode = BlendMode.NORMAL
                     elif blend_mode == 1:
                         mat.blend_mode = BlendMode.LIGHTEN
                     else:
-                        mat.blend_mode = BlendMode.NONE  # fallback
+                        raise ValueError(f"Invalid ZscMaterialBlend {blend_mode}")
 
                     mat.specular_enabled = bool(read_u16())
                     mat.alpha = read_f32()
 
+                    # 0|1 = no glow, 2-5 carry glow_color (zsc.rs
+                    # ZscMaterialGlow); 6+ is corrupt.
                     glow_type = read_u16()
-                    mat.glow = GlowType(glow_type) if glow_type in [0, 1, 2, 3, 4, 5, 6] else None
+                    if glow_type in (0, 1):
+                        mat.glow = None
+                    elif glow_type in (2, 3, 4, 5):
+                        mat.glow = GlowType(glow_type)
+                    else:
+                        raise ValueError(f"Invalid ZscMaterialGlow {glow_type}")
                     mat.glow_color = read_vec3()
 
                     if alpha_test_enabled:
@@ -306,12 +324,27 @@ class Zsc:
                                     part.parent = None
                                 else:
                                     part.parent = parent_id - 1  # 1-based → 0-based
+                            elif 8 <= prop_id <= 28:
+                                # Reserved properties: skip (zsc.rs).
+                                f.seek(size, 1)
                             elif prop_id == 29:
                                 bits = read_u16()
                                 shape = bits & 0b111
-                                flags = bits >> 3
-                                part.collision_shape = CollisionType(shape) if shape in [1, 2, 3, 4] else None
-                                part.collision_flags = flags
+                                if shape == 0:
+                                    part.collision_shape = None
+                                elif shape in (1, 2, 3, 4):
+                                    part.collision_shape = CollisionType(shape)
+                                else:
+                                    raise ValueError(
+                                        f"Invalid ZscCollisionShape {shape}")
+                                # Upper byte must be zero (zsc.rs from_bits
+                                # only accepts flag bits 3-7).
+                                if bits & 0xFF00:
+                                    raise ValueError(
+                                        f"Invalid ZscCollisionFlags {bits:#x}")
+                                # Stored unshifted (bits 3-7 -> 0-4); the
+                                # writer shifts back (see _write_part).
+                                part.collision_flags = (bits >> 3) & 0x1F
                             elif prop_id == 30:
                                 if size == 0:
                                     continue
@@ -358,8 +391,11 @@ class Zsc:
                                 else:
                                     eff.parent = parent_id - 1  # 1-based → 0-based
                             else:
-                                #skip ahead size for now ( BYTE[flag_size] data)
-                                f.seek(size, 1)
+                                # The reference rejects unknown effect
+                                # properties instead of skipping them, so a
+                                # corrupt/newer file fails loudly (zsc.rs).
+                                raise ValueError(
+                                    f"Invalid ZscObjectEffect property_id: {prop_id}")
 
                         obj.effects.append(eff)
 
@@ -373,8 +409,15 @@ class Zsc:
 
 
         except Exception as e:
-            offset = f.tell() if 'f' in locals() else 0
-            raise RuntimeError(f"Failed to load ZSC file '{filepath}' at offset {offset}: {e}")
+            # The with-block closes f before this handler runs, so tell()
+            # would raise "I/O operation on closed file" and mask the real
+            # error (all strict-validation failures surfaced as that).
+            try:
+                offset = f.tell()
+            except (ValueError, NameError):
+                offset = 0
+            raise RuntimeError(
+                f"Failed to load ZSC file '{filepath}' at offset {offset}: {e}") from e
 
     # ------------------------------------------------------------------
     # Serialization
@@ -439,7 +482,10 @@ class Zsc:
         if part.parent is not None:
             Zsc._write_prop_u16(buf, 7, part.parent + 1)
         if part.collision_shape is not None:
-            bits = int(part.collision_shape) | part.collision_flags
+            # collision_flags is stored unshifted (see load); the on-disk
+            # layout is shape bits 0-2 | flag bits 3-7. Omitting the shift
+            # corrupted every saved part (e.g. NOT_MOVEABLE -> SPHERE).
+            bits = int(part.collision_shape) | ((part.collision_flags & 0x1F) << 3)
             Zsc._write_prop_u16(buf, 29, bits)
         if part.animation_path:
             data = part.animation_path.encode('utf-8')
@@ -474,21 +520,24 @@ class Zsc:
             Zsc._write_cstr(buf, path)
 
     def _write_new_material_section(self, buf):
+        # On-disk order is 9xu16, f32 alpha, u16 glow, vec3 glow_color
+        # (see load). The previous writer emitted 11xu16 (glow + padding
+        # before alpha), producing files no correct parser could read.
         for mat in self.materials[self._original_count('materials'):]:
             Zsc._write_cstr(buf, mat.path)
-            buf.extend(struct.pack('<HHHHHHHHHHH',
-                                   1 if mat.is_skin else 0,
-                                   1 if mat.alpha_enabled else 0,
-                                   1 if mat.two_sided else 0,
-                                   1 if mat.alpha_test is not None else 0,
-                                   int((mat.alpha_test or 0.0) * 256.0),
-                                   1 if mat.z_test_enabled else 0,
-                                   1 if mat.z_write_enabled else 0,
-                                   1 if mat.blend_mode == BlendMode.LIGHTEN else 0,
-                                   1 if mat.specular_enabled else 0,
-                                   int(mat.glow) if mat.glow is not None else 0,
-                                   0))
+            buf.extend(struct.pack('<HHHHHHHHH',
+                                    1 if mat.is_skin else 0,
+                                    1 if mat.alpha_enabled else 0,
+                                    1 if mat.two_sided else 0,
+                                    1 if mat.alpha_test is not None else 0,
+                                    int((mat.alpha_test or 0.0) * 256.0),
+                                    1 if mat.z_test_enabled else 0,
+                                    1 if mat.z_write_enabled else 0,
+                                    1 if mat.blend_mode == BlendMode.LIGHTEN else 0,
+                                    1 if mat.specular_enabled else 0))
             buf.extend(struct.pack('<f', mat.alpha))
+            buf.extend(struct.pack('<H',
+                                    int(mat.glow) if mat.glow is not None else 0))
             Zsc._write_vec3(buf, mat.glow_color)
 
     def _write_new_effect_section(self, buf):

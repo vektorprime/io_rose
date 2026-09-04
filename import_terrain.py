@@ -22,7 +22,7 @@ class ImportTerrain(bpy.types.Operator, ImportHelper):
     bl_options = {"PRESET"}
 
     filename_ext = ".zon"
-    filter_glob: StringProperty(default="*.zon", options={"HIDDEN"})
+    filter_glob: StringProperty(default="*.zon;*.ZON", options={"HIDDEN"})
 
     load_texture: BoolProperty(
         name="Load textures",
@@ -241,19 +241,26 @@ class ImportTerrain(bpy.types.Operator, ImportHelper):
         bsdf = nodes.new(type='ShaderNodeBsdfPrincipled')
         bsdf.location = (300, 0)
 
+        def connect_uv(tex_node, uv_map_name, x, y):
+            """Pin a texture to an explicit UV map. An unlinked Vector input
+            would sample whichever UV layer happens to be active (currently
+            UVMap_rot), silently rotating layer1 as well."""
+            attr = nodes.new(type='ShaderNodeAttribute')
+            attr.attribute_name = uv_map_name
+            attr.location = (x, y)
+            links.new(attr.outputs['Vector'], tex_node.inputs['Vector'])
+
         if image2 is not None:
             tex2 = nodes.new(type='ShaderNodeTexImage')
             tex2.location = (-600, 0)
             tex2.image = image2
-            uv_rot_attr = nodes.new(type='ShaderNodeAttribute')
-            uv_rot_attr.attribute_name = 'UVMap_rot'
-            uv_rot_attr.location = (-900, -200)
-            links.new(uv_rot_attr.outputs['Vector'], tex2.inputs['Vector'])
+            connect_uv(tex2, 'UVMap_rot', -900, -200)
 
             if image1 is not None:
                 tex1 = nodes.new(type='ShaderNodeTexImage')
                 tex1.location = (-900, 0)
                 tex1.image = image1
+                connect_uv(tex1, 'UVMap', -1200, -200)
                 mix = nodes.new(type='ShaderNodeMix')
                 mix.data_type = 'RGBA'
                 mix.location = (-300, 0)
@@ -267,6 +274,7 @@ class ImportTerrain(bpy.types.Operator, ImportHelper):
             tex1 = nodes.new(type='ShaderNodeTexImage')
             tex1.location = (-300, 0)
             tex1.image = image1
+            connect_uv(tex1, 'UVMap', -600, -200)
             connect_color(tex1, bsdf.inputs['Base Color'])
 
         links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])
@@ -299,20 +307,26 @@ class ImportTerrain(bpy.types.Operator, ImportHelper):
     def execute(self, context):
         import time
         start_time = time.time()
-        
+
+        # Validate inputs before touching Blender state or progress.
+        if not self.filepath or not os.path.isfile(self.filepath):
+            self.report({'ERROR'}, f"Zone file not found: {self.filepath}")
+            return {'CANCELLED'}
+
         # Progress reporting
         wm = context.window_manager
         wm.progress_begin(0, 100)
 
         try:
             filepath = Path(self.filepath).resolve()
-            
+
             # Find 3DDATA root
             root_3ddata = filepath
             while root_3ddata.name.upper() != "3DDATA" and root_3ddata.parent != root_3ddata:
                 root_3ddata = root_3ddata.parent
-            
+
             if root_3ddata.name.upper() != "3DDATA":
+                self.report({'ERROR'}, "Could not find 3DDATA root directory")
                 return {'CANCELLED'}
 
             him_ext = ".HIM"
@@ -377,13 +391,14 @@ class ImportTerrain(bpy.types.Operator, ImportHelper):
                 try:
                     him = Him(him_file)
                     til = Til(til_file)
-                    him.indices = list_2d(him.width, him.length)
+                    # Row-major [length rows][width cols] (indices[vy][vx]).
+                    him.indices = list_2d(him.length, him.width)
 
-                    tiles.indices[norm_y][norm_x] = list_2d(him.width, him.length)
+                    tiles.indices[norm_y][norm_x] = list_2d(him.length, him.width)
                     tiles.hims[norm_y][norm_x] = him
                     tiles.tils[norm_y][norm_x] = til
                 except Exception as e:
-                    pass
+                    self.report({'WARNING'}, f"Failed to load tile {tile_name}: {str(e)}")
 
             wm.progress_update(30)
 
@@ -441,80 +456,10 @@ class ImportTerrain(bpy.types.Operator, ImportHelper):
                                     patch_rotation(til, zon, px, py),
                                 ))
 
-            # Generate inter-tile connections
-            for y in range(tiles.dimension.y):
-                for x in range(tiles.dimension.x):
-                    if not tiles.hims[y][x] or not tiles.indices[y][x]:
-                        continue
-                        
-                    indices = tiles.indices[y][x]
-                    him = tiles.hims[y][x]
-                    is_x_edge = (x == tiles.dimension.x - 1)
-                    is_y_edge = (y == tiles.dimension.y - 1)
-
-                    # Skip connections to neighboring tiles that don't exist on disk
-                    # (zones are sparse grids; missing tiles are skipped like the Rust client)
-                    has_x_neighbor = not is_x_edge and bool(tiles.indices[y][x + 1])
-                    has_y_neighbor = not is_y_edge and bool(tiles.indices[y + 1][x])
-                    has_xy_neighbor = has_x_neighbor and has_y_neighbor and bool(tiles.indices[y + 1][x + 1])
-
-                    for vy in range(him.length):
-                        for vx in range(him.width):
-                            is_x_edge_vertex = (vx == him.width - 1) and (vy < him.length - 1)
-                            is_y_edge_vertex = (vx < him.width - 1) and (vy == him.length - 1)
-                            is_corner_vertex = (vx == him.width - 1) and (vy == him.length - 1)
-
-                            if has_x_neighbor and is_x_edge_vertex:
-                                next_indices = tiles.indices[y][x + 1]
-                                v1 = indices[vy][vx]
-                                v2 = next_indices[vy][0]
-                                v3 = next_indices[vy + 1][0]
-                                v4 = indices[vy + 1][vx]
-                                edges += ((v1, v2), (v2, v3), (v3, v4), (v4, v1))
-                                faces.append((v1, v2, v3, v4))
-                                # Edge stitch quad is degenerate in world space;
-                                # give it the edge patch's UVs
-                                px, py = min(vx // 4, 15), vy // 4
-                                va = (vy - py * 4) / 4.0
-                                vb = (vy + 1 - py * 4) / 4.0
-                                face_uvs.append((
-                                    ((1.0, va), (0.0, va), (0.0, vb), (1.0, vb)),
-                                    patch_rotation(til, zon, px, py),
-                                ))
-
-                            if has_y_neighbor and is_y_edge_vertex:
-                                next_indices = tiles.indices[y + 1][x]
-                                v1 = indices[vy][vx]
-                                v2 = indices[vy][vx + 1]
-                                v3 = next_indices[0][vx + 1]
-                                v4 = next_indices[0][vx]
-                                edges += ((v1, v2), (v2, v3), (v3, v4), (v4, v1))
-                                faces.append((v1, v2, v3, v4))
-                                px, py = vx // 4, min(vy // 4, 15)
-                                ua = (vx - px * 4) / 4.0
-                                ub = (vx + 1 - px * 4) / 4.0
-                                face_uvs.append((
-                                    ((ua, 1.0), (ub, 1.0), (ub, 0.0), (ua, 0.0)),
-                                    patch_rotation(til, zon, px, py),
-                                ))
-
-                            if has_xy_neighbor and is_corner_vertex:
-                                right = tiles.indices[y][x + 1]
-                                diag = tiles.indices[y + 1][x + 1]
-                                down = tiles.indices[y + 1][x]
-                                diag_him = tiles.hims[y + 1][x + 1]
-                                down_him = tiles.hims[y + 1][x]
-
-                                v1 = indices[vy][vx]
-                                v2 = right[diag_him.length - 1][0]
-                                v3 = diag[0][0]
-                                v4 = down[0][down_him.width - 1]
-                                edges += ((v1, v2), (v2, v3), (v3, v4), (v4, v1))
-                                faces.append((v1, v2, v3, v4))
-                                face_uvs.append((
-                                    ((1.0, 1.0), (1.0, 1.0), (1.0, 1.0), (1.0, 1.0)),
-                                    patch_rotation(til, zon, 15, 15),
-                                ))
+            # No inter-tile stitch faces: tiles already abut exactly in
+            # absolute world space (edge vertices coincide), so stitched
+            # quads would be degenerate zero-area faces, and the Rust client
+            # (terrain.rs) spawns separate blocks without stitching.
 
             # Create terrain mesh
             mesh = bpy.data.meshes.new("ROSE_Terrain")
@@ -547,17 +492,13 @@ class ImportTerrain(bpy.types.Operator, ImportHelper):
                         til = tiles.tils[ty][tx]
                         if not til or not til.tiles:
                             continue
-                        for row in til.tiles:
-                            for patch in row:
-                                if patch.tile < len(zon.tiles):
-                                    ztile = zon.tiles[patch.tile]
-                                    l1 = ztile.layer1 + ztile.offset1
-                                    l2 = ztile.layer2 + ztile.offset2
-                                    if l1 >= len(zon.textures):
-                                        l1 = l2
-                                    if l2 >= len(zon.textures):
-                                        l2 = l1
-                                    texture_pairs.add((l1, l2))
+                        for py, row in enumerate(til.tiles):
+                            for px, patch in enumerate(row):
+                                # Single source of truth for layer mapping
+                                # (clamping + out-of-range fallback).
+                                pair = texture_pair(til, zon, px, py, len(zon.textures))
+                                if pair is not None:
+                                    texture_pairs.add(pair)
 
                 # Create materials, one per texture pair
                 texture_materials, pair_to_slot = self.create_terrain_materials(
@@ -568,25 +509,19 @@ class ImportTerrain(bpy.types.Operator, ImportHelper):
                     for mat in texture_materials:
                         mesh.materials.append(mat)
                     
-                    # Build material index array for all faces
+                    # Build material index array for all faces.
+                    # Faces are main-grid quads only (no stitch faces), in
+                    # tile-major order matching the generation loop above.
                     material_indices = [0] * len(faces)
                     face_idx = 0
-                    
+
                     for ty in range(int(tiles.dimension.y)):
                         for tx in range(int(tiles.dimension.x)):
                             if not tiles.hims[ty][tx]:
                                 continue
-                            
+
                             him = tiles.hims[ty][tx]
                             til = tiles.tils[ty][tx]
-                            is_x_edge = (tx == tiles.dimension.x - 1)
-                            is_y_edge = (ty == tiles.dimension.y - 1)
-
-                            # Must mirror the stitching loop: only count faces
-                            # for neighbors that actually exist on disk
-                            has_x_neighbor = not is_x_edge and bool(tiles.indices[ty][tx + 1])
-                            has_y_neighbor = not is_y_edge and bool(tiles.indices[ty + 1][tx])
-                            has_xy_neighbor = has_x_neighbor and has_y_neighbor and bool(tiles.indices[ty + 1][tx + 1])
 
                             def slot_for(px, py):
                                 pair = texture_pair(til, zon, px, py, len(zon.textures))
@@ -604,33 +539,7 @@ class ImportTerrain(bpy.types.Operator, ImportHelper):
                                         if slot is not None:
                                             material_indices[face_idx] = slot
                                     face_idx += 1
-                            
-                            # Inter-tile X edge faces
-                            if has_x_neighbor:
-                                for vy in range(him.length - 1):
-                                    if face_idx < len(faces) and til and til.tiles:
-                                        slot = slot_for((him.width - 1) // 4, vy // 4)
-                                        if slot is not None:
-                                            material_indices[face_idx] = slot
-                                    face_idx += 1
-                            
-                            # Inter-tile Y edge faces
-                            if has_y_neighbor:
-                                for vx in range(him.width - 1):
-                                    if face_idx < len(faces) and til and til.tiles:
-                                        slot = slot_for(vx // 4, (him.length - 1) // 4)
-                                        if slot is not None:
-                                            material_indices[face_idx] = slot
-                                    face_idx += 1
-                            
-                            # Corner faces
-                            if has_xy_neighbor:
-                                if face_idx < len(faces) and til and til.tiles:
-                                    slot = slot_for((him.width - 1) // 4, (him.length - 1) // 4)
-                                    if slot is not None:
-                                        material_indices[face_idx] = slot
-                                face_idx += 1
-                    
+
                     # Batch assign material indices to polygons
                     for i, mat_idx in enumerate(material_indices):
                         mesh.polygons[i].material_index = mat_idx

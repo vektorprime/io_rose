@@ -101,13 +101,13 @@ class Zon:
 
     def load(self, filepath):
         with open(filepath, "rb") as f:
-            block_count = read_i32(f)
-            
+            block_count = read_u32(f)
+
             # First pass: read all block headers
             blocks = []
             for i in range(block_count):
-                block_type = read_i32(f)
-                block_offset = read_i32(f)
+                block_type = read_u32(f)
+                block_offset = read_u32(f)
                 blocks.append((block_type, block_offset))
 
             self._block_order = [t for t, _ in blocks]
@@ -128,10 +128,11 @@ class Zon:
                     self.xcount = read_i32(f)
                     self.ycount = read_i32(f)
                     
-                    # Keep original loop structure - it was correct for your list_2d implementation
-                    self.positions = list_2d(self.width, self.length)
-                    for y in range(self.width):  # Outer loop: width (which is zone_width)
-                        for x in range(self.length):  # Inner loop: length (which is zone_height)
+                    # Row-major [length rows][width cols], matching the
+                    # TIL/HIM convention (til.rs / him.rs).
+                    self.positions = list_2d(self.length, self.width)
+                    for y in range(self.length):
+                        for x in range(self.width):
                             p = Position()
                             p.is_used = read_bool(f)
                             p.position.x = read_f32(f)
@@ -139,19 +140,21 @@ class Zon:
                             self.positions[y][x] = p
 
                 elif block_type == BlockType.Spawns:
-                    spawn_count = read_i32(f)
+                    spawn_count = read_u32(f)
 
                     for j in range(spawn_count):
                         s = Spawn()
+                        # Plain sequential vector (zon.rs
+                        # read_vector3_f32); the old code swapped Y/Z.
                         s.position.x = read_f32(f)
-                        s.position.z = read_f32(f)  # Z before Y!
                         s.position.y = read_f32(f)
+                        s.position.z = read_f32(f)
                         s.name, s.name_raw = read_bstr_raw(f)
-                        
+
                         self.spawns.append(s)
-                    
+
                 elif block_type == BlockType.Textures:
-                    texture_count = read_i32(f)
+                    texture_count = read_u32(f)
 
                     for j in range(texture_count):
                         tex, raw = read_bstr_raw(f)
@@ -164,17 +167,22 @@ class Zon:
                         self.textures = self.textures[:self.textures.index("end")]
 
                 elif block_type == BlockType.Tiles:
-                    tile_count = read_i32(f)
+                    tile_count = read_u32(f)
 
                     for j in range(tile_count):
                         t = Tile()
-                        t.layer1 = read_i32(f)
-                        t.layer2 = read_i32(f)
-                        t.offset1 = read_i32(f)
-                        t.offset2 = read_i32(f)
-                        t.blending = (read_i32(f) != 0)
-                        t.rotation = read_i32(f)
-                        t.tile_type = read_i32(f)
+                        t.layer1 = read_u32(f)
+                        t.layer2 = read_u32(f)
+                        t.offset1 = read_u32(f)
+                        t.offset2 = read_u32(f)
+                        t.blending = (read_u32(f) != 0)
+                        t.rotation = read_u32(f)
+                        # 0-6 are the valid ZonTileRotation values (zon.rs);
+                        # anything else is corrupt, not a new rotation.
+                        if t.rotation > 6:
+                            raise ValueError(
+                                f"Invalid tile rotation {t.rotation}")
+                        t.tile_type = read_u32(f)
 
                         self.tiles.append(t)
 
@@ -229,16 +237,16 @@ class Zon:
                                    self.length, self.grid_count))
             buf.extend(struct.pack("<f", self.grid_size))
             buf.extend(struct.pack("<ii", self.xcount, self.ycount))
-            for y in range(self.width):
-                for x in range(self.length):
+            for y in range(self.length):
+                for x in range(self.width):
                     p = self.positions[y][x]
                     buf.append(1 if p.is_used else 0)
                     buf.extend(struct.pack("<ff", p.position.x, p.position.y))
         elif block_type == BlockType.Spawns:
             buf.extend(struct.pack("<I", len(self.spawns)))
             for s in self.spawns:
-                buf.extend(struct.pack("<fff", s.position.x, s.position.z,
-                                       s.position.y))
+                buf.extend(struct.pack("<fff", s.position.x, s.position.y,
+                                       s.position.z))
                 data = Zon._str_bytes(s.name_raw, s.name)
                 buf.append(len(data))
                 buf.extend(data)

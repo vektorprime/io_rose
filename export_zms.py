@@ -357,8 +357,11 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
                 
                 key = tuple(uv_key)
                 
-                # CRITICAL CHECK: Ensure we don't exceed uint16 max for indices
-                if len(zms.vertices) >= 65535:
+                # CRITICAL CHECK: Ensure we don't exceed uint16 max for indices.
+                # Version 9 uses u32 counts/indices for large meshes, so the
+                # uint16 cap applies only below v9 (the caller already gates
+                # the pre-split mesh size via count_limit).
+                if version < 9 and len(zms.vertices) >= 65535:
                     report({'ERROR'}, f"Vertex count would exceed 65,535 after UV splitting. Current: {len(zms.vertices)}. Reduce subdivision or use fewer UV seams.")
                     return None
                 

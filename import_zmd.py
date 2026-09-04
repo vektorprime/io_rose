@@ -165,20 +165,24 @@ class ImportZMD(bpy.types.Operator, ImportHelper):
 
         entries, world_positions, world_rotations = self._world_transforms(zmd)
 
-        # Create all bones first so parenting can be done later
+        # Create all bones first so parenting can be done later.
+        # Keep our own references: Blender re-sorts edit bones into hierarchy
+        # order on mode re-entry, so integer indices are only valid here.
+        created = []
         for (name, _parent, _pos, _rot) in entries:
             bone = armature.edit_bones.new(name)
             bone.use_connect = False
+            created.append(bone)
 
         # Now set bone positions and parenting
         for idx, (name, parent, _pos, _rot) in enumerate(entries):
-            bone = armature.edit_bones[idx]
+            bone = created[idx]
 
             world_pos = world_positions[idx]
             world_rot = world_rotations[idx]
 
-            if parent != -1 and 0 <= parent < len(armature.edit_bones):
-                bone.parent = armature.edit_bones[parent]
+            if parent != -1 and 0 <= parent < len(created):
+                bone.parent = created[parent]
 
             # Set tail to point in direction of rotation
             bone.head = world_pos
@@ -224,15 +228,24 @@ class ImportZMD(bpy.types.Operator, ImportHelper):
             if xt.length < 1e-6:
                 continue
             xt.normalize()
-            rolls[idx] = math.atan2(x0.cross(xt).dot(d), x0.dot(xt))
+            rolls[name] = math.atan2(x0.cross(xt).dot(d), x0.dot(xt))
 
         if not rolls:
             return
         bpy.context.view_layer.objects.active = armature_obj
         bpy.ops.object.mode_set(mode='EDIT')
         try:
-            for idx, roll in rolls.items():
-                edit_bone = armature_obj.data.edit_bones[idx]
+            # Look up by name, never by creation index: Blender re-sorts edit
+            # bones into hierarchy (parent-before-child) order on mode
+            # re-entry, so index-based access scrambles rolls onto wrong bones
+            # once dummies (created last, parented early) are in the mix.
+            edit_bones = armature_obj.data.edit_bones
+            for name, roll in rolls.items():
+                edit_bone = edit_bones.get(name)
+                if edit_bone is None:
+                    self.report({'WARNING'},
+                        f"Bone '{name}' missing when applying rest roll")
+                    continue
                 edit_bone.roll = roll
         finally:
             bpy.ops.object.mode_set(mode='OBJECT')

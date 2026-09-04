@@ -121,6 +121,15 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
         
         self.report({'INFO'}, f"Found {len(zms_files)} ZMS files to import")
         
+        # ZMD-ordered joint names (bones, then dummies): the engine addresses
+        # skin weights and ZMO channels by these indices, which is NOT the
+        # armature's collection order (Blender sorts bones into hierarchy
+        # order, moving early-parented dummies up the list).
+        joint_names = None
+        if zmd:
+            joint_names = ([b.name for b in zmd.bones]
+                           + [d.name for d in zmd.dummies])
+
         # Import all ZMS files
         imported_count = 0
         for zms_path in zms_files:
@@ -128,9 +137,10 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
                 # Create a report function wrapper
                 def report_wrapper(level, message):
                     self.report({level}, message)
-                
+
                 zms = ZMS(str(zms_path), report_func=report_wrapper)
-                mesh_obj = self._create_mesh(context, zms, zms_path.stem, armature_obj)
+                mesh_obj = self._create_mesh(context, zms, zms_path.stem,
+                                             armature_obj, joint_names)
                 
                 # Parent mesh to armature
                 if armature_obj:
@@ -273,19 +283,23 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
         """
         entries, world_positions, world_rotations = self._world_transforms(zmd)
 
-        # Create all bones first
+        # Create all bones first. Keep our own references: Blender re-sorts
+        # edit bones into hierarchy order on mode re-entry, so integer
+        # indices into armature.edit_bones are only valid within this session.
+        created = []
         for (name, _parent, _pos, _rot) in entries:
             bone = armature.edit_bones.new(name)
             bone.use_connect = False
+            created.append(bone)
 
         # Set bone positions and parenting
         for idx, (_name, parent, _pos, _rot) in enumerate(entries):
-            bone = armature.edit_bones[idx]
+            bone = created[idx]
             world_pos = world_positions[idx]
             world_rot = world_rotations[idx]
 
-            if parent != -1 and 0 <= parent < len(armature.edit_bones):
-                bone.parent = armature.edit_bones[parent]
+            if parent != -1 and 0 <= parent < len(created):
+                bone.parent = created[parent]
             bone.head = world_pos
             bone.tail = world_pos + (world_rot @ bmath.Vector((0, 0.1, 0)))
             if bone.length < 0.001:
@@ -331,22 +345,36 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
             if xt.length < 1e-6:
                 continue
             xt.normalize()
-            rolls[idx] = math.atan2(x0.cross(xt).dot(d), x0.dot(xt))
+            rolls[name] = math.atan2(x0.cross(xt).dot(d), x0.dot(xt))
 
         if not rolls:
             return
         bpy.context.view_layer.objects.active = armature_obj
         bpy.ops.object.mode_set(mode='EDIT')
         try:
-            for idx, roll in rolls.items():
-                edit_bone = armature_obj.data.edit_bones[idx]
+            # Look up by name, never by creation index: Blender re-sorts edit
+            # bones into hierarchy (parent-before-child) order on mode
+            # re-entry, so dummy bones created last but parented early have
+            # moved - index-based access scrambles rolls onto wrong bones.
+            edit_bones = armature_obj.data.edit_bones
+            for name, roll in rolls.items():
+                edit_bone = edit_bones.get(name)
+                if edit_bone is None:
+                    self.report({'WARNING'},
+                        f"Bone '{name}' missing when applying rest roll")
+                    continue
                 edit_bone.roll = roll
         finally:
             bpy.ops.object.mode_set(mode='OBJECT')
 
     
-    def _create_mesh(self, context, zms, filename, armature_obj):
-        """Create mesh from ZMS data and optionally link to armature."""
+    def _create_mesh(self, context, zms, filename, armature_obj, joint_names=None):
+        """Create mesh from ZMS data and optionally link to armature.
+
+        joint_names is the ZMD-ordered joint list (bones, then dummies) used
+        to resolve global bone ids to vertex-group names. It must NOT be
+        derived from armature collection order (see above).
+        """
         mesh = bpy.data.meshes.new(filename)
         
         # Vertices
@@ -467,8 +495,11 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
         
         # Create vertex groups for bones BEFORE parenting
         if len(zms.bones) > 0 and armature_obj:
-            # Get bone names from armature
-            bone_names = [bone.name for bone in armature_obj.data.bones]
+            # Resolve global bone ids through the ZMD-ordered joint list.
+            # Fall back to armature order only when no ZMD names were passed
+            # (armature imported from elsewhere).
+            bone_names = (joint_names if joint_names is not None
+                          else [bone.name for bone in armature_obj.data.bones])
             
             for i, bone_id in enumerate(zms.bones):
                 # Create vertex group with bone name if available

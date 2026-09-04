@@ -26,10 +26,10 @@ Coordinate Systems:
 - Bevy (rose-zone-converter): Right-handed, Y-up, X=horizontal, Y=height, Z=depth, units in meters  
 - Blender: Right-handed, Z-up, X=horizontal, Y=depth, Z=height, units in meters
 
-Conversion from Bevy to Blender:
-  blender_x = bevy_x - world_offset_x
-  blender_y = bevy_z - world_offset_y  # Bevy Z (depth) becomes Blender Y
-  blender_z = bevy_y                   # Bevy Y (height) becomes Blender Z
+Conversion from Bevy to Blender (absolute world space, no extra offsets):
+  blender_x = bevy_x + (160 * block_x - 5200)
+  blender_y = bevy_z + (-160 * (65 - block_y) + 5200)  # Bevy Z -> Blender Y
+  blender_z = bevy_y                                   # Bevy Y -> Blender Z
 
 Block positioning (from Rust zone_loader.rs lines 3317-3318, 3424):
   offset_x = 160.0 * block_x
@@ -40,7 +40,7 @@ Block positioning (from Rust zone_loader.rs lines 3317-3318, 3424):
 from pathlib import Path
 import struct
 import bpy
-from bpy.props import StringProperty, BoolProperty, IntProperty, FloatProperty
+from bpy.props import StringProperty, BoolProperty, IntProperty
 from bpy_extras.io_utils import ImportHelper
 
 # Import ROSE file parsers from the existing rose module
@@ -98,19 +98,6 @@ class ImportCombinedZone(bpy.types.Operator, ImportHelper):
         name="Load Textures",
         description="Automatically detect and load textures",
         default=True,
-    )
-
-    # World positioning options
-    world_offset_x: FloatProperty(
-        name="World Offset X",
-        description="World offset in meters for X axis (default: 52.0m = 5200cm)",
-        default=52.0,
-    )
-
-    world_offset_y: FloatProperty(
-        name="World Offset Y", 
-        description="World offset in meters for Y axis (default: 52.0m = 5200cm)",
-        default=52.0,
     )
 
     # Debug options
@@ -422,47 +409,51 @@ class ImportCombinedZone(bpy.types.Operator, ImportHelper):
         bsdf = nodes.new(type='ShaderNodeBsdfPrincipled')
         bsdf.location = (0, 0)
         
+        # Texture node only when an image loads; otherwise the material
+        # renders black with no indication of why.
+        texture_loaded = False
         if self.load_texture:
             tex_node = nodes.new(type='ShaderNodeTexImage')
             tex_node.location = (-400, 0)
-            
+
             texture_path = self.resolve_mesh_path(zsc_mat.path, base_path)
             if texture_path:
                 try:
-                    tex_node.image = bpy.data.images.load(str(texture_path))
-                except Exception:
-                    pass
-            
-            links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
-            
-            # The game shaders always sample the texture alpha channel, so
-            # wire it whenever the texture carries one, multiplied by material alpha.
-            has_tex_alpha = tex_node.image is not None and tex_node.image.channels == 4
-            if has_tex_alpha or zsc_mat.alpha_enabled or zsc_mat.alpha != 1.0:
-                if has_tex_alpha and zsc_mat.alpha != 1.0:
-                    mult = nodes.new(type='ShaderNodeMath')
-                    mult.operation = 'MULTIPLY'
-                    mult.location = (-200, -250)
-                    mult.inputs[1].default_value = zsc_mat.alpha
-                    links.new(tex_node.outputs['Alpha'], mult.inputs[0])
-                    links.new(mult.outputs['Value'], bsdf.inputs['Alpha'])
-                elif has_tex_alpha:
-                    links.new(tex_node.outputs['Alpha'], bsdf.inputs['Alpha'])
-                else:
-                    bsdf.inputs['Alpha'].default_value = zsc_mat.alpha
-                if zsc_mat.alpha_test is not None:
-                    mat.blend_method = 'CLIP'
-                    mat.alpha_threshold = zsc_mat.alpha_test
-                else:
-                    mat.blend_method = 'HASHED'
-                if hasattr(mat, 'show_transparent_back'):
-                    mat.show_transparent_back = False
-        
+                    tex_node.image = bpy.data.images.load(
+                        str(texture_path), check_existing=True)
+                    texture_loaded = True
+                except Exception as e:
+                    self.report({'WARNING'},
+                        f"Failed to load texture {Path(texture_path).name}: {e}")
+
+            if texture_loaded:
+                links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
+            else:
+                nodes.remove(tex_node)
+
+        # Alpha mode matches the client (objects.rs): only alpha_enabled
+        # enables transparency (Mask with threshold, else Blend); texture
+        # alpha alone never does.
+        if zsc_mat.alpha_enabled:
+            if zsc_mat.alpha_test is not None:
+                mat.blend_method = 'CLIP'
+                mat.alpha_threshold = zsc_mat.alpha_test
+            else:
+                mat.blend_method = 'BLEND'
+            if texture_loaded:
+                links.new(tex_node.outputs['Alpha'], bsdf.inputs['Alpha'])
+            else:
+                bsdf.inputs['Alpha'].default_value = zsc_mat.alpha
+            if hasattr(mat, 'show_transparent_back'):
+                mat.show_transparent_back = False
+        else:
+            mat.blend_method = 'OPAQUE'
+
         links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])
-        
-        if zsc_mat.two_sided:
-            mat.use_backface_culling = False
-        
+
+        # Single-sided materials must cull backfaces (client cull_mode).
+        mat.use_backface_culling = not zsc_mat.two_sided
+
         return mat
 
     # =========================================================================
@@ -595,17 +586,18 @@ class ImportCombinedZone(bpy.types.Operator, ImportHelper):
                     try:
                         block_x = int(parts[1])
                         block_y = int(parts[2])
-                        
-                        # Match Rust implementation exactly (zone_loader.rs lines 3317-3318, 3424)
-                        # offset in centimeters, then convert to meters
-                        rust_offset_x = 160.0 * block_x  # cm
-                        rust_offset_y = 160.0 * (65.0 - block_y)  # cm
-                        
-                        # Apply world centering: Transform::from_xyz(offset_x - 5200, 0, -offset_y + 5200)
-                        # Convert to meters and apply coordinate system conversion
-                        offset_x = (rust_offset_x - 5200.0) / 100.0  # cm to m
-                        offset_y = (-rust_offset_y + 5200.0) / 100.0  # cm to m, inverted Y
-                        
+
+                        # Match the Rust client exactly (zone_loader.rs
+                        # 3317-3318, 3424): from_xyz(offset_x - 5200, 0,
+                        # -offset_y + 5200). Converter values are already
+                        # meters (like the merge path in
+                        # import_converted_terrain.py) - no /100.
+                        rust_offset_x = 160.0 * block_x
+                        rust_offset_y = 160.0 * (65.0 - block_y)
+
+                        offset_x = rust_offset_x - 5200.0
+                        offset_y = -rust_offset_y + 5200.0
+
                     except ValueError:
                         if self.verbose_logging:
                             self.report({'WARNING'}, f"Could not parse block coordinates from {block_name}")
@@ -685,16 +677,14 @@ class ImportCombinedZone(bpy.types.Operator, ImportHelper):
                         if self.verbose_logging:
                             self.report({'WARNING'}, f"Could not parse coordinates from {stem}")
                 
-                # Calculate world position matching Rust implementation (zone_loader.rs lines 3317-3318, 3424)
-                # Rust: offset_x = 160.0 * block_x, offset_y = 160.0 * (65.0 - block_y) in cm
-                # Transform::from_xyz(offset_x - 5200.0, 0.0, -offset_y + 5200.0)
+                # World position matching the Rust client (zone_loader.rs
+                # 3317-3318, 3424): from_xyz(offset_x - 5200, 0,
+                # -offset_y + 5200), all in meters.
                 rust_offset_x = 160.0 * block_x
                 rust_offset_y = 160.0 * (65.0 - block_y)
-                
-                # Convert to meters: divide by 100 (cm to m)
-                # Rust uses cm, Blender uses meters
-                world_pos_x = rust_offset_x / 100.0 - 52.0  # offset in meters minus centering
-                world_pos_y = -rust_offset_y / 100.0 + 52.0  # Inverted Y axis, converted to meters
+
+                world_pos_x = rust_offset_x - 5200.0
+                world_pos_y = -rust_offset_y + 5200.0
                 
                 if self.verbose_logging:
                     self.report({'INFO'}, f"Block {stem}: World position ({world_pos_x:.1f}, {world_pos_y:.1f})")
@@ -737,40 +727,62 @@ class ImportCombinedZone(bpy.types.Operator, ImportHelper):
     # OBJECT IMPORT (from IFO/ZSC files)
     # =========================================================================
 
-    def spawn_object(self, context, collection, zsc, ifo_object, material_cache, mesh_cache, base_path):
+    @staticmethod
+    def _world_to_block(location):
+        """(block_x, block_y) for a Blender world position (inverse of the
+        terrain placement: block corner = 160 * block - 5200 m)."""
+        return (int((location[0] + 5200.0) // 160.0),
+                int((location[1] + 5200.0) // 160.0))
+
+    def spawn_object(self, context, collection, zsc, ifo_object, material_cache, mesh_cache, base_path,
+                     ifo_block_type=None, ifo_index=None):
         """Spawn a ZSC object from IFO data with correct coordinate conversion"""
         zsc_obj = zsc.objects[ifo_object.object_id]
-        
+
         # Create parent empty for this object instance
         obj_name = ifo_object.object_name if ifo_object.object_name else f"Object_{ifo_object.object_id}"
         parent_empty = bpy.data.objects.new(obj_name, None)
         parent_empty.empty_display_type = 'PLAIN_AXES'
         parent_empty.empty_display_size = 0.5
         collection.objects.link(parent_empty)
-        
-        # Convert ROSE coordinates to Blender (X, -Y, Z) and scale by 1/100
+
+        # IFO positions are absolute world cm; the converted position is
+        # absolute Blender meters - no tile/world offset is applied (the old
+        # +52 m offset misaligned every object; also note base_path is the
+        # mesh-resolve root, never a tuple).
         pos = ifo_object.position
         bx, by, bz = convert_rose_position_to_blender(pos.x, pos.y, pos.z)
-        
-        # Apply tile offset (passed via base_path which is actually a tuple: (tile_world_x, tile_world_y))
-        # If base_path is not a tuple, use the default world offsets for backward compatibility
-        if isinstance(base_path, tuple) and len(base_path) >= 2:
-            tile_offset_x, tile_offset_y = base_path[0], base_path[1]
-            parent_empty.location = (bx + tile_offset_x, by + tile_offset_y, bz)
-        else:
-            # Fallback to default world offsets
-            parent_empty.location = (bx + self.world_offset_x, by + self.world_offset_y, bz)
+        parent_empty.location = (bx, by, bz)
+
+        # --- Round-trip metadata (used by the zone exporter) ---
+        # The block is derived from the world position (same rule the
+        # exporter uses), so saves update the right IFO record.
+        block_x, block_y = self._world_to_block(parent_empty.location)
+        parent_empty["rose_block_x"] = block_x
+        parent_empty["rose_block_y"] = block_y
+        if ifo_block_type is not None:
+            parent_empty["rose_ifo_block"] = ifo_block_type
+        if ifo_index is not None:
+            parent_empty["rose_ifo_index"] = int(ifo_index)
+        parent_empty["rose_zsc_object_id"] = int(ifo_object.object_id)
+        parent_empty["rose_zsc_path"] = zsc.filepath
+        parent_empty["rose_ifo_object_name"] = ifo_object.object_name
 
         # Convert rotation from IFO (XYZW order) to Blender (WXYZ order)
         # Both Z-up, only negate Y component: (w, x, y, z) -> (w, x, -y, z)
+        # NOTE: rotation_mode must be set BEFORE assigning
+        # rotation_quaternion - in Euler mode the assignment is a no-op
+        # for the actual transform in Blender 4.x.
         from mathutils import Quaternion
         rot = ifo_object.rotation
+        parent_empty.rotation_mode = 'QUATERNION'
         parent_empty.rotation_quaternion = Quaternion((rot.w, rot.x, -rot.y, rot.z))
-        
+
         # Scale: no axis swap needed since both use Z-up
         parent_empty.scale = (ifo_object.scale.x, ifo_object.scale.y, ifo_object.scale.z)
-        
+
         # Spawn all component parts (meshes) of this object
+        part_objects = []
         for part_idx, part in enumerate(zsc_obj.parts):
             part_obj = self.spawn_part(
                 context, zsc, part, part_idx,
@@ -779,7 +791,52 @@ class ImportCombinedZone(bpy.types.Operator, ImportHelper):
             if part_obj:
                 collection.objects.link(part_obj)
                 part_obj.parent = parent_empty
-        
+                part_objects.append(part_obj)
+            else:
+                part_objects.append(None)
+
+        # Second pass: sibling part parenting (part.parent indexes parts).
+        for part_idx, part in enumerate(zsc_obj.parts):
+            part_obj = part_objects[part_idx]
+            if part_obj is None or part.parent is None:
+                continue
+            if 0 <= part.parent < len(part_objects) and part_objects[part.parent] is not None:
+                if part.parent == part_idx:
+                    self.report({'WARNING'},
+                        f"{obj_name}: part {part_idx} parents to itself - ignored")
+                else:
+                    try:
+                        part_obj.parent = part_objects[part.parent]
+                    except RuntimeError:
+                        self.report({'WARNING'},
+                            f"{obj_name}: part {part_idx} parenting loop - kept on object root")
+            else:
+                self.report({'WARNING'},
+                    f"{obj_name}: part {part_idx} has invalid parent "
+                    f"{part.parent} - kept on object root")
+
+        # Effects as placeholder empties (ids/placement preserved).
+        for eff_idx, eff in enumerate(zsc_obj.effects):
+            eff_obj = bpy.data.objects.new(f"{obj_name}_effect{eff_idx}", None)
+            eff_obj.empty_display_type = 'PLAIN_AXES'
+            eff_obj.empty_display_size = 0.3
+            eff_obj["rose_effect_id"] = eff.effect_id
+            eff_obj["rose_effect_type"] = int(eff.effect_type)
+            if eff.parent is not None:
+                eff_obj["rose_parent_part"] = eff.parent
+            collection.objects.link(eff_obj)
+            if eff.parent is not None and 0 <= eff.parent < len(part_objects) \
+                    and part_objects[eff.parent] is not None:
+                eff_obj.parent = part_objects[eff.parent]
+            else:
+                eff_obj.parent = parent_empty
+            epos = eff.position
+            eff_obj.location = convert_rose_position_to_blender(epos.x, epos.y, epos.z)
+            eff_obj.rotation_mode = 'QUATERNION'
+            eff_obj.rotation_quaternion = Quaternion(
+                (eff.rotation.w, eff.rotation.x, -eff.rotation.y, eff.rotation.z))
+            eff_obj.scale = (eff.scale.x, eff.scale.y, eff.scale.z)
+
         return parent_empty
 
     def spawn_part(self, context, zsc, part, part_idx, material_cache, mesh_cache, base_path, obj_name):
@@ -789,38 +846,67 @@ class ImportCombinedZone(bpy.types.Operator, ImportHelper):
         
         mesh_id = part.mesh_id
         material_id = part.material_id
-        
-        # Retrieve or load the ZMS mesh data
-        if mesh_id not in mesh_cache:
+
+        # Bounds checks (the client skips out-of-range parts); without them
+        # one bad part aborts the whole IFO file with an IndexError/KeyError.
+        if mesh_id >= len(zsc.meshes):
+            self.report({'WARNING'},
+                f"{obj_name}: part {part_idx} references missing mesh {mesh_id} - skipped")
+            return None
+        if material_id >= len(zsc.materials):
+            self.report({'WARNING'},
+                f"{obj_name}: part {part_idx} references missing material {material_id} - skipped")
+            return None
+
+        # Mesh cache is keyed (id(zsc), mesh_id): ids repeat across files.
+        cache_key = (id(zsc), mesh_id)
+        if cache_key not in mesh_cache:
             mesh_path = zsc.meshes[mesh_id]
-            mesh_cache[mesh_id] = self.load_zms_mesh(mesh_path, base_path)
-        
-        mesh_data = mesh_cache[mesh_id]
+            mesh_cache[cache_key] = self.load_zms_mesh(mesh_path, base_path)
+
+        mesh_data = mesh_cache[cache_key]
         if not mesh_data:
             return None
-        
+
         # Create the Blender object
         part_name = f"{obj_name}_part{part_idx}"
         obj = bpy.data.objects.new(part_name, mesh_data)
-        
-        # Apply material from cache
-        if material_id in material_cache:
-            if len(obj.data.materials) > 0:
-                obj.data.materials[0] = material_cache[material_id]
+
+        # Apply material from cache. Materials live on the (possibly shared)
+        # mesh data, so a differing material needs a mesh copy first.
+        mat = material_cache.get(material_id)
+        if mat is not None:
+            if len(mesh_data.materials) and mesh_data.materials[0] != mat:
+                mesh_data = mesh_data.copy()
+                obj.data = mesh_data
+            if len(mesh_data.materials):
+                mesh_data.materials[0] = mat
             else:
-                obj.data.materials.append(material_cache[material_id])
-        
+                mesh_data.materials.append(mat)
+
+        # Attachments the preview cannot resolve are kept as custom
+        # properties (bone/dummy need an armature, animation a ZMO).
+        if part.bone_index is not None:
+            obj["rose_bone_index"] = part.bone_index
+        if part.dummy_index is not None:
+            obj["rose_dummy_index"] = part.dummy_index
+        if part.animation_path:
+            obj["rose_animation_path"] = part.animation_path
+        if part.collision_shape is not None:
+            obj["rose_collision_shape"] = int(part.collision_shape)
+            obj["rose_collision_flags"] = part.collision_flags
+
         # Local transform (relative to parent) - no world offset needed
         obj.location = convert_rose_position_to_blender(part.position.x, part.position.y, part.position.z)
-        
+
         # Convert rotation from ZSC part (WXYZ in file, stored as XYZW in Vec4) to Blender
         rot = part.rotation
         obj.rotation_mode = 'QUATERNION'
         obj.rotation_quaternion = Quaternion((rot.w, rot.x, -rot.y, rot.z))
-        
+
         # Scale: no axis swap needed since both use Z-up
         obj.scale = (part.scale.x, part.scale.y, part.scale.z)
-        
+
         return obj
 
     def load_zms_mesh(self, mesh_path, base_path):
@@ -835,11 +921,13 @@ class ImportCombinedZone(bpy.types.Operator, ImportHelper):
             zms = ZMS(str(full_path))
             mesh_name = Path(mesh_path).stem
             mesh = bpy.data.meshes.new(mesh_name)
-            
-            # Mesh vertices are in local object space - use as-is from file
-            verts = [(v.position.x, v.position.y, v.position.z) for v in zms.vertices]
-            faces = [(int(i.x), int(i.y), int(i.z)) for i in zms.indices]
-            
+
+            # Mesh-local vertices use the same (x, -y, z) mirror as the
+            # placement transforms (see import_map.load_zms_mesh). The mirror
+            # has determinant -1, so triangle winding is swapped as well.
+            verts = [(v.position.x, -v.position.y, v.position.z) for v in zms.vertices]
+            faces = [(int(i.x), int(i.z), int(i.y)) for i in zms.indices]
+
             mesh.from_pydata(verts, [], faces)
             
             if zms.uv1_enabled() and zms.vertices:
@@ -997,11 +1085,13 @@ class ImportCombinedZone(bpy.types.Operator, ImportHelper):
                         deco_collection = bpy.data.collections.new("DECO_Objects")
                         context.scene.collection.children.link(deco_collection)
                     
-                    # Pre-create material caches
+                    # Pre-create material caches. Mesh caches are keyed
+                    # (id(zsc), mesh_id): mesh ids repeat across ZSC files.
                     material_cache_cnst = {}
                     material_cache_deco = {}
                     mesh_cache_cnst = {}
                     mesh_cache_deco = {}
+                    deco_mat_view = {}
                     
                     if zsc_cnst:
                         for mat_id in range(len(zsc_cnst.materials)):
@@ -1025,32 +1115,47 @@ class ImportCombinedZone(bpy.types.Operator, ImportHelper):
                             
                             # Spawn CNST objects
                             if self.load_cnst_objects and zsc_cnst:
-                                for obj_inst in ifo.cnst_objects:
+                                for obj_index, obj_inst in enumerate(ifo.cnst_objects):
                                     if obj_inst.object_id < len(zsc_cnst.objects):
                                         self.spawn_object(
                                             context, cnst_collection, zsc_cnst, obj_inst,
-                                            material_cache_cnst, mesh_cache_cnst, root_3ddata
+                                            material_cache_cnst, mesh_cache_cnst, root_3ddata,
+                                            ifo_block_type="CNST", ifo_index=obj_index
                                         )
-                            
+                                    else:
+                                        self.report({'WARNING'},
+                                            f"CNST '{obj_inst.object_name}' references missing "
+                                            f"object {obj_inst.object_id} - skipped")
+
                             # Spawn DECO objects
                             if self.load_deco_objects and zsc_deco_list:
-                                for obj_inst in ifo.deco_objects:
+                                for obj_index, obj_inst in enumerate(ifo.deco_objects):
                                     target_zsc = None
                                     for deco_zsc in zsc_deco_list:
                                         if obj_inst.object_id < len(deco_zsc.objects):
                                             target_zsc = deco_zsc
                                             break
-                                    
-                                    if target_zsc:
-                                        temp_cache = {}
-                                        for key, mat in material_cache_deco.items():
-                                            if key[0] == id(target_zsc):
-                                                temp_cache[key[1]] = mat
-                                        
-                                        self.spawn_object(
-                                            context, deco_collection, target_zsc, obj_inst,
-                                            temp_cache, mesh_cache_deco, root_3ddata
-                                        )
+
+                                    if not target_zsc:
+                                        self.report({'WARNING'},
+                                            f"DECO '{obj_inst.object_name}' references missing "
+                                            f"object {obj_inst.object_id} - skipped")
+                                        continue
+
+                                    temp_cache = deco_mat_view.get(id(target_zsc))
+                                    if temp_cache is None:
+                                        temp_cache = {
+                                            mat_id: mat
+                                            for (zid, mat_id), mat in material_cache_deco.items()
+                                            if zid == id(target_zsc)
+                                        }
+                                        deco_mat_view[id(target_zsc)] = temp_cache
+
+                                    self.spawn_object(
+                                        context, deco_collection, target_zsc, obj_inst,
+                                        temp_cache, mesh_cache_deco, root_3ddata,
+                                        ifo_block_type="DECO", ifo_index=obj_index
+                                    )
                         
                         except Exception as e:
                             if self.verbose_logging:

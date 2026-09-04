@@ -25,16 +25,32 @@ ZONE_DIR = os.environ.get(
 )
 
 
+def _find_file(prefer, ext):
+    """Preferred test file, else the first matching file in the zone dir."""
+    cand = os.path.join(ZONE_DIR, prefer)
+    if os.path.isfile(cand):
+        return cand
+    for name in sorted(os.listdir(ZONE_DIR)):
+        if name.upper().endswith(ext):
+            return os.path.join(ZONE_DIR, name)
+    raise FileNotFoundError(f"no *{ext} file in {ZONE_DIR}")
+
+
 def tex_for(til, zon, vx, vy, mode):
-    px = min(vx, 15) if mode == "old" else min(vx // 4, 15)
-    py = min(vy, 15) if mode == "old" else min(vy // 4, 15)
+    # Exercise the real texture_pair lookup (not a reimplementation): quads
+    # address 4x4-quad patches, so quad coords scale down by 4. The old bug
+    # used min(vx, 15), collapsing quads 15..63 onto patch column/row 15.
+    if mode == "old":
+        px, py = min(vx, 15), min(vy, 15)
+    else:
+        px, py = vx // 4, vy // 4
     pair = texture_pair(til, zon, px, py, len(zon.textures))
     return pair[0] if pair else -1
 
 
 def main():
-    zon = Zon(os.path.join(ZONE_DIR, "JDT01.ZON"))
-    til = Til(os.path.join(ZONE_DIR, "31_30.TIL"))
+    zon = Zon(_find_file("JDT01.ZON", ".ZON"))
+    til = Til(_find_file("31_30.TIL", ".TIL"))
 
     # Print the fixed 16x16 patch map for reference
     print("Texture index per patch (16x16, fixed mapping):")
@@ -46,7 +62,6 @@ def main():
     # Old behavior: quads vx=15..63 all -> patch column 15.
     row0 = [tex_for(til, zon, vx, 0, "fixed") for vx in range(64)]
     assert len(set(row0)) >= 4, "row 0 should contain multiple distinct textures"
-    assert tex_for(til, zon, 4, 0, "fixed") != tex_for(til, zon, 8, 0, "fixed") or True  # informational
 
     # The old bug: vx=15 and vx=63 mapped to the SAME texture
     # (both collapsed to patch column 15). With the fix they may still be

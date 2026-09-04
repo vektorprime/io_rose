@@ -24,15 +24,24 @@ ZONE_DIR = os.environ.get(
     _paths.client_zone_dir(),
 )
 
-GRID_SCALE = 2.5
-BLOCK_SIZE = 64.0 * GRID_SCALE
-WORLD_ORIGIN = -32.5 * BLOCK_SIZE
+WORLD_ORIGIN = -5200.0  # ROSE world offset in meters (client terrain.rs)
 
 
-def terrain_bounds(tx, ty):
-    x0 = tx * BLOCK_SIZE + WORLD_ORIGIN
-    y0 = ty * BLOCK_SIZE + WORLD_ORIGIN
-    return (x0, x0 + BLOCK_SIZE, y0, y0 + BLOCK_SIZE)
+def _find_zon():
+    """JDT01.ZON by default, else the first .ZON in the zone dir."""
+    cand = os.path.join(ZONE_DIR, "JDT01.ZON")
+    if os.path.isfile(cand):
+        return cand
+    for name in sorted(os.listdir(ZONE_DIR)):
+        if name.upper().endswith(".ZON"):
+            return os.path.join(ZONE_DIR, name)
+    return None
+
+
+def terrain_bounds(tx, ty, block_size):
+    x0 = tx * block_size + WORLD_ORIGIN
+    y0 = ty * block_size + WORLD_ORIGIN
+    return (x0, x0 + block_size, y0, y0 + block_size)
 
 
 def main():
@@ -40,18 +49,28 @@ def main():
         print(f"zone dir not found: {ZONE_DIR}")
         return 1
 
-    zon = Zon(os.path.join(ZONE_DIR, "JDT01.ZON"))
+    zon_path = _find_zon()
+    if zon_path is None:
+        print(f"no .ZON file in {ZONE_DIR}")
+        return 1
+    zon = Zon(zon_path)
     print(f"ZON: type={zon.zone_type} grid={zon.width}x{zon.length} grid_size={zon.grid_size}")
 
-    # Sanity dump of the ZON position grid (map-editor coordinates)
+    # Per-quad scale derived from the zone (grid_size meters per 100 quads),
+    # not hardcoded 2.5: other zones use different grid sizes.
+    grid_scale = zon.grid_size / 100.0 if zon.grid_size else 2.5
+    block_size = 64.0 * grid_scale
+
+    # Sanity dump of the ZON position grid (map-editor coordinates).
+    # No try/except here: an IndexError means the grid layout is wrong and
+    # must fail loudly instead of passing vacuously.
     print("\nZON positions sample:")
+    assert len(zon.positions) == zon.length and len(zon.positions[0]) == zon.width, \
+        "ZON position grid is not [length rows][width cols]"
     for y in (30, 31):
         for x in (31, 32):
-            try:
-                p = zon.positions[y][x]
-                print(f"  [{y}][{x}]: used={p.is_used} pos=({p.position.x:.0f}, {p.position.y:.0f})")
-            except Exception:
-                pass
+            p = zon.positions[y][x]
+            print(f"  [{y}][{x}]: used={p.is_used} pos=({p.position.x:.0f}, {p.position.y:.0f})")
 
     # The core regression: every IFO object must fall within its own tile's
     # terrain bounds (with a small tolerance).
@@ -61,7 +80,7 @@ def main():
         if not name.upper().endswith(".IFO"):
             continue
         tx, ty = map(int, name.split(".")[0].split("_"))
-        x0, x1, y0, y1 = terrain_bounds(tx, ty)
+        x0, x1, y0, y1 = terrain_bounds(tx, ty, block_size)
         ifo = Ifo(os.path.join(ZONE_DIR, name))
         for obj in ifo.cnst_objects + ifo.deco_objects:
             total += 1

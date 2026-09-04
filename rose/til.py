@@ -37,10 +37,13 @@ class Til:
         - 4 bytes: tile (u32) - index into ZON texture array
         """
         with open(filepath, 'rb') as f:
-            self.width = read_i32(f)
-            self.length = read_i32(f)
-            
-            self.tiles = list_2d(self.width, self.length)
+            self.width = read_u32(f)
+            self.length = read_u32(f)
+
+            # Row-major [length rows][width cols] (til.rs tiles[y*width+x]).
+            # The old code allocated [width rows] and indexed [l<length][w],
+            # which crashes or transposes non-square grids.
+            self.tiles = list_2d(self.length, self.width)
 
             for l in range(self.length):
                 for w in range(self.width):
@@ -60,8 +63,8 @@ class Til:
         map editor's write_til_file() layout; original metadata bytes are
         preserved when saving a file that was loaded."""
         with open(filepath, 'wb') as f:
-            write_i32(f, self.width)
-            write_i32(f, self.length)
+            write_u32(f, self.width)
+            write_u32(f, self.length)
             for l in range(self.length):
                 for w in range(self.width):
                     t = self.tiles[l][w]

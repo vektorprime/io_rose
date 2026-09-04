@@ -57,9 +57,12 @@ def main():
     faces = len(terrain.data.polygons)
     print(f"meshes: {meshes} objects: {objects} terrain faces: {faces}")
 
+    # Exact reference (were >100/>1000/>60000, allowing ~10% silent loss):
+    # JDT01 = 16 tiles x 64x64 main-grid quads = 65536 polygons. No stitch
+    # faces exist (tiles abut exactly); anything else means geometry drift.
     assert meshes > 100, "expected ZSC part meshes (CNST/DECO)"
     assert objects > 1000, "expected spawned IFO objects"
-    assert faces > 60000, "expected ~67081 terrain faces"
+    assert faces == 65536, f"expected 65536 terrain faces, got {faces}"
     assert len(terrain.data.uv_layers) >= 2, "expected UVMap + UVMap_rot"
     assert len(terrain.data.materials) > 10, "expected per-pair terrain materials"
     assert any(o.type == "LIGHT" and o.data.type == "SUN" for o in bpy.context.scene.objects), \

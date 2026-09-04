@@ -1,8 +1,10 @@
 """Face/material count alignment on sparse tile grids.
 
-The inter-tile stitching loop and the material-index loop in import_map.py /
-import_terrain.py must count faces identically, otherwise material slots
-drift. This mirrors the fix from the 2026-07-31 session (sparse-tile crash).
+The terrain has main-grid quads only (no inter-tile stitch faces: tiles abut
+exactly in world space and the client spawns separate blocks). The face loop
+and the material-index loop in import_map.py / import_terrain.py must count
+faces identically, otherwise material slots drift. This mirrors the fix from
+the 2026-07-31 session (sparse-tile crash).
 
 Exit code 0 on success, 1 on failure.
 """
@@ -32,7 +34,7 @@ def build(tiles, dim_x, dim_y, missing=()):
 
 
 def count_faces(tiles):
-    """Mirrors import_map.py's vertex + stitching face counting."""
+    """Mirrors import_map.py's main-grid face counting (no stitch faces)."""
     total = 0
     per_tile = {}
     for y in range(tiles.dimension.y):
@@ -40,25 +42,14 @@ def count_faces(tiles):
             if not tiles.hims[y][x] or not tiles.indices[y][x]:
                 continue
             him = tiles.hims[y][x]
-            is_x_edge = (x == tiles.dimension.x - 1)
-            is_y_edge = (y == tiles.dimension.y - 1)
-            has_x_neighbor = not is_x_edge and bool(tiles.indices[y][x + 1])
-            has_y_neighbor = not is_y_edge and bool(tiles.indices[y + 1][x])
-            has_xy_neighbor = has_x_neighbor and has_y_neighbor and bool(tiles.indices[y + 1][x + 1])
             n = (him.length - 1) * (him.width - 1)
-            if has_x_neighbor:
-                n += him.length - 1
-            if has_y_neighbor:
-                n += him.width - 1
-            if has_xy_neighbor:
-                n += 1
             per_tile[(x, y)] = n
             total += n
     return total, per_tile
 
 
 def count_materials(tiles):
-    """Mirrors import_map.py's material-index face counting."""
+    """Mirrors import_map.py's material-index face counting (no stitch)."""
     total = 0
     per_tile = {}
     for ty in range(int(tiles.dimension.y)):
@@ -66,18 +57,7 @@ def count_materials(tiles):
             if not tiles.hims[ty][tx]:
                 continue
             him = tiles.hims[ty][tx]
-            is_x_edge = (tx == tiles.dimension.x - 1)
-            is_y_edge = (ty == tiles.dimension.y - 1)
-            has_x_neighbor = not is_x_edge and bool(tiles.indices[ty][tx + 1])
-            has_y_neighbor = not is_y_edge and bool(tiles.indices[ty + 1][tx])
-            has_xy_neighbor = has_x_neighbor and has_y_neighbor and bool(tiles.indices[ty + 1][tx + 1])
             n = (him.length - 1) * (him.width - 1)
-            if has_x_neighbor:
-                n += him.length - 1
-            if has_y_neighbor:
-                n += him.width - 1
-            if has_xy_neighbor:
-                n += 1
             per_tile[(tx, ty)] = n
             total += n
     return total, per_tile
@@ -103,11 +83,15 @@ def main():
         build(tiles, dx, dy, missing)
         f_total, f_per = count_faces(tiles)
         m_total, m_per = count_materials(tiles)
-        status = "OK" if (f_total == m_total and f_per == m_per) else "MISMATCH"
+        # Exact main-grid count: present tiles x 64x64 quads (65x65 hims).
+        expected = (dx * dy - len(missing)) * 64 * 64
+        status = "OK" if (f_total == m_total and f_per == m_per
+                          and f_total == expected) else "MISMATCH"
         if status != "OK":
             ok = False
             diff = set(f_per.items()) ^ set(m_per.items())
-            print(f"{name}: faces={f_total} materials={m_total} {status} diff={diff}")
+            print(f"{name}: faces={f_total} materials={m_total} "
+                  f"expected={expected} {status} diff={diff}")
         else:
             print(f"{name}: faces={f_total} materials={m_total} {status}")
 

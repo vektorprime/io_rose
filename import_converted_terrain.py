@@ -47,18 +47,6 @@ class ImportConvertedTerrain(bpy.types.Operator, ImportHelper):
         default=True,
     )
 
-    world_offset_x: bpy.props.FloatProperty(
-        name="World Offset X",
-        description="World offset in meters for X axis (default: 52.0m = 5200cm)",
-        default=52.0,
-    )
-
-    world_offset_y: bpy.props.FloatProperty(
-        name="World Offset Y",
-        description="World offset in meters for Y axis (default: 52.0m = 5200cm)",
-        default=52.0,
-    )
-
     merge_blocks: BoolProperty(
         name="Merge All Blocks",
         description="Merge all terrain blocks in the directory into a single mesh",
@@ -207,17 +195,19 @@ class ImportConvertedTerrain(bpy.types.Operator, ImportHelper):
             self.report({'ERROR'}, f"Failed to create material: {str(e)}")
             return None
 
-    def create_mesh_from_data(self, mesh_data, block_name, world_offset_x, world_offset_y, context):
+    def create_mesh_from_data(self, mesh_data, block_name, context):
         """
         Create a Blender mesh from the parsed mesh data.
-        
+
+        Positions are converted Bevy Y-up -> Blender Z-up only; world
+        placement comes from the per-block offsets (merge path) or the
+        object location (separate path), never from an extra parameter.
+
         Args:
             mesh_data: Dictionary with positions, normals, uvs, tangents, indices
             block_name: Name for the mesh object
-            world_offset_x: X offset in meters
-            world_offset_y: Y offset in meters
             context: Blender context (needed for operations)
-            
+
         Returns:
             Blender mesh object
         """
@@ -248,8 +238,8 @@ class ImportConvertedTerrain(bpy.types.Operator, ImportHelper):
             # Convert from Bevy (Y-up) to Blender (Z-up)
             # Bevy: X, Y (height), Z (depth)
             # Blender: X, Y (depth), Z (height)
-            blender_x = x - world_offset_x
-            blender_y = z - world_offset_y  # Bevy Z (depth) becomes Blender Y
+            blender_x = x
+            blender_y = z  # Bevy Z (depth) becomes Blender Y
             blender_z = y  # Bevy Y (height) becomes Blender Z
             blender_positions.append((blender_x, blender_y, blender_z))
         
@@ -443,7 +433,7 @@ class ImportConvertedTerrain(bpy.types.Operator, ImportHelper):
                     'index_count': len(all_indices)
                 }
                 
-                obj = self.create_mesh_from_data(merged_data, "Merged", 0, 0, context)
+                obj = self.create_mesh_from_data(merged_data, "Merged", context)
                 created_objects.append(obj)
                 
                 # Create material (using first block's textures as reference)
@@ -490,18 +480,16 @@ class ImportConvertedTerrain(bpy.types.Operator, ImportHelper):
                         except ValueError:
                             self.report({'WARNING'}, f"Could not parse coordinates from {stem}")
                     
-                    # Calculate world position matching Rust implementation (zone_loader.rs lines 3317-3318, 3424)
-                    # Rust: offset_x = 160.0 * block_x, offset_y = 160.0 * (65.0 - block_y)
-                    # Transform::from_xyz(offset_x - 5200.0, 0.0, -offset_y + 5200.0)
+                    # World position matching the Rust client (zone_loader.rs
+                    # 3317-3318, 3424): from_xyz(offset_x - 5200, 0,
+                    # -offset_y + 5200), all in meters (the converter emits
+                    # meters, like the merge path above - not centimeters).
                     rust_offset_x = 160.0 * block_x
                     rust_offset_y = 160.0 * (65.0 - block_y)
-                    
-                    # Convert Bevy Y-up to Blender Z-up:
-                    # Bevy Transform(x, y=height, z=depth) -> Blender position(x, depth, height)
-                    # Rust uses: x = offset_x - 5200, y = 0 (center), z = -offset_y + 5200
-                    # In Blender Z-up: x stays same, Bevy's Z (depth) becomes Y, Bevy's Y (height) becomes Z
-                    world_pos_x = rust_offset_x - 52.0  # Convert cm to meters (5200cm = 52m)
-                    world_pos_y = -rust_offset_y + 52.0  # Inverted and converted to meters
+
+                    # Bevy Transform(x, y=height, z=depth) -> Blender (x, depth, height)
+                    world_pos_x = rust_offset_x - 5200.0
+                    world_pos_y = -rust_offset_y + 5200.0
                     
                     self.report({'INFO'}, f"Block {stem}: World position ({world_pos_x:.1f}, {world_pos_y:.1f})")
                     
@@ -515,12 +503,10 @@ class ImportConvertedTerrain(bpy.types.Operator, ImportHelper):
                         self.report({'ERROR'}, f"Albedo texture not found for block {stem}: {albedo_path}")
                         continue
                     
-                    # Create mesh object (without world offset since we'll position it manually)
+                    # Create mesh object (positioned via object location below)
                     obj = self.create_mesh_from_data(
                         mesh_data,
                         stem,  # Unique name per block
-                        0.0,   # No X offset - handled by object location
-                        0.0,   # No Y offset - handled by object location
                         context
                     )
                     

@@ -123,6 +123,14 @@ class EnhanceWings(bpy.types.Operator):
         name="Directory",
         description="Folder containing the wing .ZMS/.DDS pairs",
         default="",
+        subtype='DIR_PATH',
+    )
+    filepath: StringProperty(
+        name="File",
+        description="Pick any file inside the wing folder (its directory is used)",
+        default="",
+        subtype='FILE_PATH',
+        options={'HIDDEN', 'SKIP_SAVE'},
     )
     name_filter: StringProperty(
         name="Name filter",
@@ -161,18 +169,31 @@ class EnhanceWings(bpy.types.Operator):
         default=True,
     )
 
+    def invoke(self, context, event):
+        # Launched from the Import menu there is no directory yet: open the
+        # file browser so the user can point at the wing folder. Without
+        # this the operator ran immediately with directory="" and cancelled.
+        if not self.directory:
+            context.window_manager.fileselect_add(self)
+            return {'RUNNING_MODAL'}
+        return self.execute(context)
+
     def execute(self, context):
         from .export_zms import export_zms_mesh_object
         from .rose.zms import ZMS
 
         directory = Path(self.directory)
+        if not directory.is_dir() and self.filepath:
+            directory = Path(self.filepath).parent
         if not directory.is_dir():
             self.report({'ERROR'}, f"Not a directory: {directory}")
             return {'CANCELLED'}
 
+        # Case-insensitive match (glob("*.ZMS") misses *.zms on Linux).
         zms_files = sorted(
-            p for p in directory.glob("*.ZMS")
-            if self.name_filter.upper() in p.name.upper()
+            p for p in directory.iterdir()
+            if p.is_file() and p.suffix.lower() == ".zms"
+            and self.name_filter.upper() in p.name.upper()
         )
         if not zms_files:
             self.report({'ERROR'}, f"No *{self.name_filter}*.ZMS files in {directory}")
@@ -181,40 +202,101 @@ class EnhanceWings(bpy.types.Operator):
         done, skipped, failed = [], [], []
         loaded_images = []
         for zms_path in zms_files:
+            # One bad file must never abort the batch or lose the tallies.
             try:
-                z = ZMS(str(zms_path))
+                status, msg = self._process_one(
+                    zms_path, directory, export_zms_mesh_object,
+                    ZMS, loaded_images)
             except Exception as e:
-                failed.append((zms_path.name, f"parse error: {e}"))
+                failed.append((zms_path.name, f"unexpected error: {e}"))
                 continue
-            if self.skip_processed and len(z.vertices) > 1000:
-                skipped.append((zms_path.name, "already enhanced"))
-                continue
-            if not z.uv1_enabled():
-                skipped.append((zms_path.name, "no UV1"))
-                continue
+            if status == "done":
+                done.append(zms_path.name)
+            elif status == "skipped":
+                skipped.append((zms_path.name, msg))
+            else:
+                failed.append((zms_path.name, msg))
 
-            tex_path = None
-            for ext in (".DDS", ".dds", ".PNG", ".png"):
-                cand = zms_path.with_suffix(ext)
-                if cand.exists():
-                    tex_path = cand
-                    break
-            if tex_path is None:
-                skipped.append((zms_path.name, "no texture"))
-                continue
+        for img in loaded_images:
+            try:
+                if img.users == 0:
+                    bpy.data.images.remove(img)
+            except (ReferenceError, RuntimeError):
+                pass
 
-            img = bpy.data.images.load(str(tex_path))
-            loaded_images.append(img)
-            grids = _texture_grids(img)
+        self.report({'INFO'}, f"Enhanced {len(done)}: {', '.join(done)}")
+        if skipped:
+            self.report({'WARNING'}, f"Skipped {len(skipped)}: " +
+                        "; ".join(f"{n} ({r})" for n, r in skipped))
+        if failed:
+            self.report({'ERROR'}, f"Failed {len(failed)}: " +
+                        "; ".join(f"{n} ({r})" for n, r in failed))
+        return {'FINISHED'}
 
-            mesh = bpy.data.meshes.new(zms_path.stem)
-            verts = [(v.position.x, v.position.y, v.position.z) for v in z.vertices]
+    def _process_one(self, zms_path, directory, export_zms_mesh_object,
+                     ZMS, loaded_images):
+        """Enhance one wing file. Returns (status, message)."""
+        try:
+            z = ZMS(str(zms_path))
+        except Exception as e:
+            return ("failed", f"parse error: {e}")
+        if self.skip_processed and len(z.vertices) > 1000:
+            return ("skipped", "already enhanced")
+        if not z.uv1_enabled():
+            return ("skipped", "no UV1")
+
+        tex_path = None
+        for ext in (".DDS", ".dds", ".PNG", ".png"):
+            cand = zms_path.with_suffix(ext)
+            if cand.exists():
+                tex_path = cand
+                break
+        if tex_path is None:
+            return ("skipped", "no texture")
+
+        try:
+            img = bpy.data.images.load(str(tex_path), check_existing=True)
+        except Exception as e:
+            return ("failed", f"texture load error: {e}")
+        loaded_images.append(img)
+        grids = _texture_grids(img)
+
+        # Original per-vertex data for the post-densify transfer (nearest
+        # original vertex): bone slots are bone-table positions, matching
+        # what the exporter expects for obj.vertex_groups order.
+        orig_pos = [(v.position.x, v.position.y, v.position.z) for v in z.vertices]
+        global_to_table = {}
+        for table_idx, gid in enumerate(z.bones):
+            global_to_table.setdefault(int(gid), table_idx)
+        orig_weights = []
+        for v in z.vertices:
+            slots = []
+            if z.bones_enabled():
+                for k in range(4):
+                    w = v.bone_weights[k]
+                    if w > 0.0:
+                        slots.append((global_to_table.get(int(v.bone_indices[k]), 0), w))
+            orig_weights.append(slots)
+        orig_colors = ([(v.color.r, v.color.g, v.color.b, v.color.a)
+                        for v in z.vertices] if z.colors_enabled() else None)
+
+        mesh = bpy.data.meshes.new(zms_path.stem)
+        obj = None
+        try:
             faces = [(int(i.x), int(i.y), int(i.z)) for i in z.indices]
-            mesh.from_pydata(verts, [], faces)
-            uvl = mesh.uv_layers.new(name="UVMap")
-            for loop_idx, loop in enumerate(mesh.loops):
-                uv = z.vertices[loop.vertex_index].uv1
-                uvl.data[loop_idx].uv = (uv.x, 1.0 - uv.y)
+            mesh.from_pydata(orig_pos, [], faces)
+            # All UV channels up front (in uv1..uv4 order) so subdivision
+            # interpolates them and the exporter round-trips them.
+            for layer_no, flag in enumerate(("uv1_enabled", "uv2_enabled",
+                                             "uv3_enabled", "uv4_enabled")):
+                if not getattr(z, flag)():
+                    continue
+                attr = ("uv1", "uv2", "uv3", "uv4")[layer_no]
+                uvl = mesh.uv_layers.new(
+                    name="UVMap" if layer_no == 0 else f"UVMap{layer_no + 1}")
+                for loop_idx, loop in enumerate(mesh.loops):
+                    uv = getattr(z.vertices[loop.vertex_index], attr)
+                    uvl.data[loop_idx].uv = (uv.x, 1.0 - uv.y)
             mesh.update(calc_edges=True)
 
             bm = bmesh.new()
@@ -236,32 +318,66 @@ class EnhanceWings(bpy.types.Operator):
             # triggers viewport/EEVEE updates that have crashed Blender
             obj = bpy.data.objects.new(zms_path.stem, mesh)
 
+            # Metadata stashes the exporter restores (version/bones/strips/
+            # materials); without them re-export writes defaults/white.
+            obj["zms_version"] = z.version
+            obj["zms_strips"] = str(list(z.strips))
+            if z.bones:
+                obj["zms_bones"] = str([int(b) for b in z.bones])
+            if z.materials:
+                obj["zms_materials"] = str([int(m) for m in z.materials])
+
+            if z.bones and any(orig_weights):
+                from mathutils.kdtree import KDTree
+                for _ in z.bones:
+                    obj.vertex_groups.new(name=f"zms_bone_{len(obj.vertex_groups)}")
+                kd = KDTree(len(orig_pos))
+                for i, co in enumerate(orig_pos):
+                    kd.insert(co, i)
+                kd.balance()
+                for v in mesh.vertices:
+                    _, orig_idx, _ = kd.find(v.co)
+                    for table_idx, w in orig_weights[orig_idx]:
+                        if 0 <= table_idx < len(obj.vertex_groups):
+                            obj.vertex_groups[table_idx].add([v.index], w, 'REPLACE')
+
+            if orig_colors is not None:
+                from mathutils.kdtree import KDTree
+                color_attr = mesh.color_attributes.new(
+                    name="Color", type='FLOAT_COLOR', domain='POINT')
+                kd = KDTree(len(orig_pos))
+                for i, co in enumerate(orig_pos):
+                    kd.insert(co, i)
+                kd.balance()
+                for v in mesh.vertices:
+                    _, orig_idx, _ = kd.find(v.co)
+                    if v.index < len(color_attr.data):
+                        color_attr.data[v.index].color = orig_colors[orig_idx]
+
+            # Never clobber an earlier backup: the second run over the same
+            # folder would otherwise destroy the pristine originals.
             if self.backup:
                 backup_dir = directory / "backup_originals"
                 backup_dir.mkdir(exist_ok=True)
-                shutil.copy2(zms_path, backup_dir / zms_path.name)
+                dest = backup_dir / zms_path.name
+                if not dest.exists():
+                    shutil.copy2(zms_path, dest)
 
             err = export_zms_mesh_object(
                 obj, str(zms_path), version=z.version,
                 apply_world_transform=False, convert_coordinates=False,
                 report=self.report,
             )
-            bpy.data.objects.remove(obj, do_unlink=True)
-            bpy.data.meshes.remove(mesh)
             if err:
-                failed.append((zms_path.name, err))
-                continue
-            done.append(zms_path.name)
-
-        for img in loaded_images:
-            if img.users == 0:
-                bpy.data.images.remove(img)
-
-        self.report({'INFO'}, f"Enhanced {len(done)}: {', '.join(done)}")
-        if skipped:
-            self.report({'WARNING'}, f"Skipped {len(skipped)}: " +
-                        "; ".join(f"{n} ({r})" for n, r in skipped))
-        if failed:
-            self.report({'ERROR'}, f"Failed {len(failed)}: " +
-                        "; ".join(f"{n} ({r})" for n, r in failed))
-        return {'FINISHED'}
+                return ("failed", err)
+            return ("done", "")
+        finally:
+            if obj is not None:
+                try:
+                    bpy.data.objects.remove(obj, do_unlink=True)
+                except (ReferenceError, RuntimeError):
+                    pass
+            try:
+                bpy.data.meshes.remove(mesh)
+            except (ReferenceError, RuntimeError):
+                pass

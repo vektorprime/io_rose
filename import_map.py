@@ -25,7 +25,7 @@ class ImportMap(bpy.types.Operator, ImportHelper):
     bl_options = {"PRESET"}
 
     filename_ext = ".zon"
-    filter_glob: StringProperty(default="*.zon", options={"HIDDEN"})
+    filter_glob: StringProperty(default="*.zon;*.ZON", options={"HIDDEN"})
 
     load_texture: BoolProperty(
         name="Load textures",
@@ -181,19 +181,26 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         bsdf = nodes.new(type='ShaderNodeBsdfPrincipled')
         bsdf.location = (300, 0)
 
+        def connect_uv(tex_node, uv_map_name, x, y):
+            """Pin a texture to an explicit UV map. An unlinked Vector input
+            would sample whichever UV layer happens to be active (currently
+            UVMap_rot), silently rotating layer1 as well."""
+            attr = nodes.new(type='ShaderNodeAttribute')
+            attr.attribute_name = uv_map_name
+            attr.location = (x, y)
+            links.new(attr.outputs['Vector'], tex_node.inputs['Vector'])
+
         if image2 is not None:
             tex2 = nodes.new(type='ShaderNodeTexImage')
             tex2.location = (-600, 0)
             tex2.image = image2
-            uv_rot_attr = nodes.new(type='ShaderNodeAttribute')
-            uv_rot_attr.attribute_name = 'UVMap_rot'
-            uv_rot_attr.location = (-900, -200)
-            links.new(uv_rot_attr.outputs['Vector'], tex2.inputs['Vector'])
+            connect_uv(tex2, 'UVMap_rot', -900, -200)
 
             if image1 is not None:
                 tex1 = nodes.new(type='ShaderNodeTexImage')
                 tex1.location = (-900, 0)
                 tex1.image = image1
+                connect_uv(tex1, 'UVMap', -1200, -200)
                 mix = nodes.new(type='ShaderNodeMix')
                 mix.data_type = 'RGBA'
                 mix.location = (-300, 0)
@@ -207,6 +214,7 @@ class ImportMap(bpy.types.Operator, ImportHelper):
             tex1 = nodes.new(type='ShaderNodeTexImage')
             tex1.location = (-300, 0)
             tex1.image = image1
+            connect_uv(tex1, 'UVMap', -600, -200)
             connect_color(tex1, bsdf.inputs['Base Color'])
 
         links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])
@@ -501,23 +509,27 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         
         t = start_time
 
+        # Validate inputs before touching Blender state or progress.
+        if not self.filepath or not os.path.isfile(self.filepath):
+            self.report({'ERROR'}, f"Zone file not found: {self.filepath}")
+            return {'CANCELLED'}
+
         # Progress reporting to prevent Blender freeze
         wm = context.window_manager
         wm.progress_begin(0, 100)
-        
+
         # CRITICAL: Disable viewport updates for performance
         # Store original state to restore later
-        original_viewport_shade = None
+        original_use_autopersist = None
         try:
             original_use_autopersist = bpy.context.preferences.view.use_auto_persist
             bpy.context.preferences.view.use_auto_persist = False
-        except:
-            original_use_autopersist = None
+        except Exception:
             pass
-        
+
         # Use faster mesh creation method
         import bmesh
-        
+
         # Batch link lists
         terrain_objects = []
         object_cache = {}  # For mesh instancing
@@ -526,13 +538,14 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         # Expected: 3DDATA/MAPS/JUNON/JPT01/30_30.ZON
         try:
             filepath = Path(self.filepath).resolve()
-            
+
             # Find 3DDATA root (go up until we find it)
             root_3ddata = filepath
             while root_3ddata.name.upper() != "3DDATA" and root_3ddata.parent != root_3ddata:
                 root_3ddata = root_3ddata.parent
-            
+
             if root_3ddata.name.upper() != "3DDATA":
+                self.report({'ERROR'}, "Could not find 3DDATA root directory")
                 return {'CANCELLED'}
                 
             map_name = self.get_map_name()  # e.g., "JUNON", "ELDEON", "LUNAR"
@@ -657,6 +670,7 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                         continue
 
             if tiles.count == 0:
+                self.report({'ERROR'}, f"No HIM tiles found in {zon_dir}")
                 return {'CANCELLED'}
 
             tiles.dimension.x = tiles.max_pos.x - tiles.min_pos.x + 1
@@ -680,24 +694,24 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                 try:
                     him = Him(him_file)
                     til = Til(til_file)
-                    him.indices = list_2d(him.width, him.length)
-                    
-                    # Load IFO if exists
+                    # Row-major [length rows][width cols] (indices[vy][vx]).
+                    him.indices = list_2d(him.length, him.width)
+
+                    # Load IFO if exists (a missing IFO is normal for sparse
+                    # zones; only parse failures are reported).
                     ifo = None
                     if os.path.exists(ifo_file):
                         try:
                             ifo = Ifo(ifo_file)
                         except Exception as e:
-                            if self.verbose_logging:
-                                self.report({'WARNING'}, f"Failed to load IFO {ifo_file}: {str(e)}")
+                            self.report({'WARNING'}, f"Failed to load IFO {ifo_file}: {str(e)}")
 
-                    tiles.indices[norm_y][norm_x] = list_2d(him.width, him.length)
+                    tiles.indices[norm_y][norm_x] = list_2d(him.length, him.width)
                     tiles.hims[norm_y][norm_x] = him
                     tiles.tils[norm_y][norm_x] = til
                     tiles.ifos[norm_y][norm_x] = ifo
                 except Exception as e:
-                    if self.verbose_logging:
-                        self.report({'WARNING'}, f"Failed to load tile {tile_name}: {str(e)}")
+                    self.report({'WARNING'}, f"Failed to load tile {tile_name}: {str(e)}")
 
             wm.progress_update(30)
             t = record_time("Load tile data", t)
@@ -763,80 +777,10 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                                     patch_rotation(til, zon, px, py),
                                 ))
 
-            # Generate inter-tile connections
-            for y in range(tiles.dimension.y):
-                for x in range(tiles.dimension.x):
-                    if not tiles.hims[y][x] or not tiles.indices[y][x]:
-                        continue
-                        
-                    indices = tiles.indices[y][x]
-                    him = tiles.hims[y][x]
-                    is_x_edge = (x == tiles.dimension.x - 1)
-                    is_y_edge = (y == tiles.dimension.y - 1)
-
-                    # Skip connections to neighboring tiles that don't exist on disk
-                    # (zones are sparse grids; missing tiles are skipped like the Rust client)
-                    has_x_neighbor = not is_x_edge and bool(tiles.indices[y][x + 1])
-                    has_y_neighbor = not is_y_edge and bool(tiles.indices[y + 1][x])
-                    has_xy_neighbor = has_x_neighbor and has_y_neighbor and bool(tiles.indices[y + 1][x + 1])
-
-                    for vy in range(him.length):
-                        for vx in range(him.width):
-                            is_x_edge_vertex = (vx == him.width - 1) and (vy < him.length - 1)
-                            is_y_edge_vertex = (vx < him.width - 1) and (vy == him.length - 1)
-                            is_corner_vertex = (vx == him.width - 1) and (vy == him.length - 1)
-
-                            if has_x_neighbor and is_x_edge_vertex:
-                                next_indices = tiles.indices[y][x + 1]
-                                v1 = indices[vy][vx]
-                                v2 = next_indices[vy][0]
-                                v3 = next_indices[vy + 1][0]
-                                v4 = indices[vy + 1][vx]
-                                edges += ((v1, v2), (v2, v3), (v3, v4), (v4, v1))
-                                faces.append((v1, v2, v3, v4))
-                                # Edge stitch quad is degenerate in world space;
-                                # give it the edge patch's UVs
-                                px, py = min(vx // 4, 15), vy // 4
-                                va = (vy - py * 4) / 4.0
-                                vb = (vy + 1 - py * 4) / 4.0
-                                face_uvs.append((
-                                    ((1.0, va), (0.0, va), (0.0, vb), (1.0, vb)),
-                                    patch_rotation(til, zon, px, py),
-                                ))
-
-                            if has_y_neighbor and is_y_edge_vertex:
-                                next_indices = tiles.indices[y + 1][x]
-                                v1 = indices[vy][vx]
-                                v2 = indices[vy][vx + 1]
-                                v3 = next_indices[0][vx + 1]
-                                v4 = next_indices[0][vx]
-                                edges += ((v1, v2), (v2, v3), (v3, v4), (v4, v1))
-                                faces.append((v1, v2, v3, v4))
-                                px, py = vx // 4, min(vy // 4, 15)
-                                ua = (vx - px * 4) / 4.0
-                                ub = (vx + 1 - px * 4) / 4.0
-                                face_uvs.append((
-                                    ((ua, 1.0), (ub, 1.0), (ub, 0.0), (ua, 0.0)),
-                                    patch_rotation(til, zon, px, py),
-                                ))
-
-                            if has_xy_neighbor and is_corner_vertex:
-                                right = tiles.indices[y][x + 1]
-                                diag = tiles.indices[y + 1][x + 1]
-                                down = tiles.indices[y + 1][x]
-                                diag_him = tiles.hims[y + 1][x + 1]
-                                down_him = tiles.hims[y + 1][x]
-
-                                v1 = indices[vy][vx]
-                                v2 = right[diag_him.length - 1][0]
-                                v3 = diag[0][0]
-                                v4 = down[0][down_him.width - 1]
-                                edges += ((v1, v2), (v2, v3), (v3, v4), (v4, v1))
-                                faces.append((v1, v2, v3, v4))
-                                face_uvs.append((
-                                    ((1.0, 1.0), (1.0, 1.0), (1.0, 1.0), (1.0, 1.0)),
-                                    patch_rotation(til, zon, 15, 15),
-                                ))
+            # No inter-tile stitch faces: tiles already abut exactly in
+            # absolute world space (edge vertices coincide), so stitched
+            # quads would be degenerate zero-area faces, and the Rust client
+            # (terrain.rs) spawns separate blocks without stitching.
 
             # Create terrain mesh
             mesh = bpy.data.meshes.new("ROSE_Terrain")
@@ -869,17 +813,13 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                         til = tiles.tils[ty][tx]
                         if not til or not til.tiles:
                             continue
-                        for row in til.tiles:
-                            for patch in row:
-                                if patch.tile < len(zon.tiles):
-                                    ztile = zon.tiles[patch.tile]
-                                    l1 = ztile.layer1 + ztile.offset1
-                                    l2 = ztile.layer2 + ztile.offset2
-                                    if l1 >= len(zon.textures):
-                                        l1 = l2
-                                    if l2 >= len(zon.textures):
-                                        l2 = l1
-                                    texture_pairs.add((l1, l2))
+                        for py, row in enumerate(til.tiles):
+                            for px, patch in enumerate(row):
+                                # Single source of truth for layer mapping
+                                # (clamping + out-of-range fallback).
+                                pair = texture_pair(til, zon, px, py, len(zon.textures))
+                                if pair is not None:
+                                    texture_pairs.add(pair)
                 
                 # Create materials, one per texture pair
                 texture_materials, pair_to_slot = self.create_terrain_materials(
@@ -890,26 +830,20 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                     for mat in texture_materials:
                         mesh.materials.append(mat)
                     
-                    # Build material index array for all faces at once
+                    # Build material index array for all faces at once.
+                    # Faces are main-grid quads only (no stitch faces), in
+                    # tile-major order matching the generation loop above.
                     material_indices = [0] * len(faces)
                     face_idx = 0
 
-                    # Single pass: compute material for each face type
+                    # Single pass: compute material for each face
                     for ty in range(int(tiles.dimension.y)):
                         for tx in range(int(tiles.dimension.x)):
                             if not tiles.hims[ty][tx]:
                                 continue
-                            
+
                             him = tiles.hims[ty][tx]
                             til = tiles.tils[ty][tx]
-                            is_x_edge = (tx == tiles.dimension.x - 1)
-                            is_y_edge = (ty == tiles.dimension.y - 1)
-
-                            # Must mirror the stitching loop: only count faces
-                            # for neighbors that actually exist on disk
-                            has_x_neighbor = not is_x_edge and bool(tiles.indices[ty][tx + 1])
-                            has_y_neighbor = not is_y_edge and bool(tiles.indices[ty + 1][tx])
-                            has_xy_neighbor = has_x_neighbor and has_y_neighbor and bool(tiles.indices[ty + 1][tx + 1])
 
                             def slot_for(px, py):
                                 pair = texture_pair(til, zon, px, py, len(zon.textures))
@@ -928,33 +862,7 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                                         if slot is not None:
                                             material_indices[face_idx] = slot
                                     face_idx += 1
-                            
-                            # Inter-tile X edge faces
-                            if has_x_neighbor:
-                                for vy in range(him.length - 1):
-                                    if face_idx < len(faces) and til and til.tiles:
-                                        slot = slot_for((him.width - 1) // 4, vy // 4)
-                                        if slot is not None:
-                                            material_indices[face_idx] = slot
-                                    face_idx += 1
-                            
-                            # Inter-tile Y edge faces
-                            if has_y_neighbor:
-                                for vx in range(him.width - 1):
-                                    if face_idx < len(faces) and til and til.tiles:
-                                        slot = slot_for(vx // 4, (him.length - 1) // 4)
-                                        if slot is not None:
-                                            material_indices[face_idx] = slot
-                                    face_idx += 1
-                            
-                            # Corner faces
-                            if has_xy_neighbor:
-                                if face_idx < len(faces) and til and til.tiles:
-                                    slot = slot_for((him.width - 1) // 4, (him.length - 1) // 4)
-                                    if slot is not None:
-                                        material_indices[face_idx] = slot
-                                face_idx += 1
-                    
+
                     # Batch assign material indices to polygons
                     for i, mat_idx in enumerate(material_indices):
                         mesh.polygons[i].material_index = mat_idx
@@ -982,8 +890,12 @@ class ImportMap(bpy.types.Operator, ImportHelper):
             # Spawn objects from IFO files (only for loaded tiles)
             material_cache_cnst = {}
             material_cache_deco = {}
+            # Mesh caches are keyed (id(zsc), mesh_id): mesh ids are only
+            # unique per ZSC file, so a bare mesh_id key serves the wrong
+            # geometry once a second file is loaded.
             mesh_cache_cnst = {}
             mesh_cache_deco = {}
+            deco_mat_view = {}
             
             # First pass: collect which object IDs are actually used and pre-load materials
             used_cnst_objects = set()
@@ -1051,11 +963,13 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                     if self.load_cnst_objects and zsc_cnst:
                         block_x = x + tiles.min_pos.x
                         block_y = y + tiles.min_pos.y
-                        for obj_index, obj_inst in enumerate(ifo.cnst_objects):                            
+                        for obj_index, obj_inst in enumerate(ifo.cnst_objects):
                             if obj_inst.object_id >= len(zsc_cnst.objects):
-                                pass
+                                self.report({'WARNING'},
+                                    f"CNST '{obj_inst.object_name}' references missing "
+                                    f"object {obj_inst.object_id} - skipped")
                                 continue
-                            
+
                             self.spawn_object(
                                 context, cnst_collection, zsc_cnst, obj_inst,
                                 material_cache_cnst, mesh_cache_cnst, root_3ddata,
@@ -1075,17 +989,23 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                                 if obj_inst.object_id < len(deco_zsc.objects):
                                     target_zsc = deco_zsc
                                     break
-                            
+
                             if not target_zsc:
-                                pass
+                                self.report({'WARNING'},
+                                    f"DECO '{obj_inst.object_name}' references missing "
+                                    f"object {obj_inst.object_id} - skipped")
                                 continue
-                            
-                            # Use appropriate material cache key
-                            temp_cache = {}
-                            for key, mat in material_cache_deco.items():
-                                if key[0] == id(target_zsc):
-                                    temp_cache[key[1]] = mat
-                            
+
+                            # Per-ZSC material view (built once per ZSC below).
+                            temp_cache = deco_mat_view.get(id(target_zsc))
+                            if temp_cache is None:
+                                temp_cache = {
+                                    mat_id: mat
+                                    for (zid, mat_id), mat in material_cache_deco.items()
+                                    if zid == id(target_zsc)
+                                }
+                                deco_mat_view[id(target_zsc)] = temp_cache
+
                             self.spawn_object(
                                 context, deco_collection, target_zsc, obj_inst,
                                 temp_cache, mesh_cache_deco, root_3ddata,
@@ -1095,10 +1015,18 @@ class ImportMap(bpy.types.Operator, ImportHelper):
                             total_deco += 1
             
             t = record_time("Spawn objects", t)
-            
+
         finally:
-            pass
-        
+            # Always leave progress + viewport prefs clean, even on early
+            # CANCELLED returns above (a stuck progress bar used to survive
+            # failed imports).
+            wm.progress_end()
+            try:
+                if original_use_autopersist is not None:
+                    bpy.context.preferences.view.use_auto_persist = original_use_autopersist
+            except Exception:
+                pass
+
         # Print timing summary
         elapsed = time.time() - start_time
         self.report({'INFO'}, f"Import completed in {elapsed:.2f} seconds")
@@ -1152,6 +1080,7 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         parent_empty.scale = (ifo_object.scale.x, ifo_object.scale.y, ifo_object.scale.z)
         
         # Spawn all component parts (meshes) of this object
+        part_objects = []
         for part_idx, part in enumerate(zsc_obj.parts):
             part_obj = self.spawn_part(
                 context, zsc, part, part_idx,
@@ -1160,54 +1089,129 @@ class ImportMap(bpy.types.Operator, ImportHelper):
             if part_obj:
                 collection.objects.link(part_obj)
                 part_obj.parent = parent_empty
-        
+                part_objects.append(part_obj)
+            else:
+                part_objects.append(None)
+
+        # Second pass: sibling part parenting (part.parent indexes parts).
+        for part_idx, part in enumerate(zsc_obj.parts):
+            part_obj = part_objects[part_idx]
+            if part_obj is None or part.parent is None:
+                continue
+            if 0 <= part.parent < len(part_objects) and part_objects[part.parent] is not None:
+                if part.parent == part_idx:
+                    self.report({'WARNING'},
+                        f"{obj_name}: part {part_idx} parents to itself - ignored")
+                else:
+                    try:
+                        part_obj.parent = part_objects[part.parent]
+                    except RuntimeError:
+                        self.report({'WARNING'},
+                            f"{obj_name}: part {part_idx} parenting loop - kept on object root")
+            else:
+                self.report({'WARNING'},
+                    f"{obj_name}: part {part_idx} has invalid parent "
+                    f"{part.parent} - kept on object root")
+
+        # Effects as placeholder empties (ids/placement preserved).
+        for eff_idx, eff in enumerate(zsc_obj.effects):
+            eff_obj = bpy.data.objects.new(f"{obj_name}_effect{eff_idx}", None)
+            eff_obj.empty_display_type = 'PLAIN_AXES'
+            eff_obj.empty_display_size = 0.3
+            eff_obj["rose_effect_id"] = eff.effect_id
+            eff_obj["rose_effect_type"] = int(eff.effect_type)
+            if eff.parent is not None:
+                eff_obj["rose_parent_part"] = eff.parent
+            collection.objects.link(eff_obj)
+            if eff.parent is not None and 0 <= eff.parent < len(part_objects) \
+                    and part_objects[eff.parent] is not None:
+                eff_obj.parent = part_objects[eff.parent]
+            else:
+                eff_obj.parent = parent_empty
+            pos = eff.position
+            eff_obj.location = convert_rose_position_to_blender(pos.x, pos.y, pos.z)
+            eff_obj.rotation_mode = 'QUATERNION'
+            from mathutils import Quaternion
+            eff_obj.rotation_quaternion = Quaternion(
+                (eff.rotation.w, eff.rotation.x, -eff.rotation.y, eff.rotation.z))
+            eff_obj.scale = (eff.scale.x, eff.scale.y, eff.scale.z)
+
         return parent_empty
 
     def spawn_part(self, context, zsc, part, part_idx, material_cache, mesh_cache, base_path, obj_name):
         """Spawn a single ZSC part (mesh instance) with local transform"""
         mesh_id = part.mesh_id
         material_id = part.material_id
-        
-        # Retrieve or load the ZMS mesh data
-        if mesh_id not in mesh_cache:
+
+        # Bounds checks (the client skips out-of-range parts); without them
+        # one bad part aborts the whole import with an IndexError/KeyError.
+        if mesh_id >= len(zsc.meshes):
+            self.report({'WARNING'},
+                f"{obj_name}: part {part_idx} references missing mesh {mesh_id} - skipped")
+            return None
+        if material_id >= len(zsc.materials):
+            self.report({'WARNING'},
+                f"{obj_name}: part {part_idx} references missing material {material_id} - skipped")
+            return None
+
+        # Mesh cache is keyed (id(zsc), mesh_id): ids repeat across files.
+        cache_key = (id(zsc), mesh_id)
+        if cache_key not in mesh_cache:
             mesh_path = zsc.meshes[mesh_id]
-            mesh_cache[mesh_id] = self.load_zms_mesh(mesh_path, base_path)
-        
-        mesh_data = mesh_cache[mesh_id]
+            mesh_cache[cache_key] = self.load_zms_mesh(mesh_path, base_path)
+
+        mesh_data = mesh_cache[cache_key]
         if not mesh_data:
             return None
-        
+
         # Create the Blender object
         part_name = f"{obj_name}_part{part_idx}"
         obj = bpy.data.objects.new(part_name, mesh_data)
-        
-        # Apply material from cache
-        if material_id in material_cache:
-            if len(obj.data.materials) > 0:
-                obj.data.materials[0] = material_cache[material_id]
+
+        # Apply material from cache. Materials live on the (possibly shared)
+        # mesh data, so a differing material needs a mesh copy first.
+        mat = material_cache.get(material_id)
+        if mat is not None:
+            if len(mesh_data.materials) and mesh_data.materials[0] != mat:
+                mesh_data = mesh_data.copy()
+                obj.data = mesh_data
+            if len(mesh_data.materials):
+                mesh_data.materials[0] = mat
             else:
-                obj.data.materials.append(material_cache[material_id])
-        
+                mesh_data.materials.append(mat)
+
+        # Attachments the preview cannot resolve are kept as custom
+        # properties (bone/dummy need an armature, animation a ZMO).
+        if part.bone_index is not None:
+            obj["rose_bone_index"] = part.bone_index
+        if part.dummy_index is not None:
+            obj["rose_dummy_index"] = part.dummy_index
+        if part.animation_path:
+            obj["rose_animation_path"] = part.animation_path
+        if part.collision_shape is not None:
+            obj["rose_collision_shape"] = int(part.collision_shape)
+            obj["rose_collision_flags"] = part.collision_flags
+
         # --- Local Transform (Relative to Parent) ---
         # Both Rose and Blender use Z-up coordinate systems
         # Convert ROSE coordinates to Blender (X, -Y, Z) and scale by 1/100
         # Note: Parts use local coordinates relative to parent, so no world offset needed
         obj.location = convert_rose_position_to_blender(part.position.x, part.position.y, part.position.z)
-        
+
         # Convert rotation from ZSC part (WXYZ in file, stored as XYZW in Vec4) to Blender
         # Both Z-up, only negate Y component: (w, x, y, z) -> (w, x, -y, z)
         from mathutils import Quaternion
         rot = part.rotation
         obj.rotation_mode = 'QUATERNION'
         obj.rotation_quaternion = Quaternion((rot.w, rot.x, -rot.y, rot.z))
-        
+
         # Scale: no axis swap needed since both use Z-up
         obj.scale = (
             part.scale.x,
             part.scale.y,
             part.scale.z
         )
-        
+
         return obj
     
     def load_zms_mesh(self, mesh_path, base_path):
@@ -1220,12 +1224,15 @@ class ImportMap(bpy.types.Operator, ImportHelper):
             zms = ZMS(str(full_path))
             mesh_name = Path(mesh_path).stem
             mesh = bpy.data.meshes.new(mesh_name)
-            
-            # Mesh vertices are in local object space - use as-is from file
-            # Coordinate transform is applied via object transform, not vertex positions
-            verts = [(v.position.x, v.position.y, v.position.z) for v in zms.vertices]
-            faces = [(int(i.x), int(i.y), int(i.z)) for i in zms.indices]
-            
+
+            # Mesh-local vertices use the same (x, -y, z) mirror as the
+            # placement transforms: the composed world must equal the mirrored
+            # ROSE world, otherwise asymmetric props mirror against their own
+            # placements. The mirror has determinant -1, so triangle winding
+            # is swapped to keep faces and normals consistent.
+            verts = [(v.position.x, -v.position.y, v.position.z) for v in zms.vertices]
+            faces = [(int(i.x), int(i.z), int(i.y)) for i in zms.indices]
+
             mesh.from_pydata(verts, [], faces)
             
             if zms.uv1_enabled() and zms.vertices:
@@ -1286,45 +1293,49 @@ class ImportMap(bpy.types.Operator, ImportHelper):
         bsdf = nodes.new(type='ShaderNodeBsdfPrincipled')
         bsdf.location = (0, 0)
         
+        # Texture node only when an image loads; otherwise the material
+        # renders black with no indication of why.
+        texture_loaded = False
         if self.load_texture:
             tex_node = nodes.new(type='ShaderNodeTexImage')
             tex_node.location = (-400, 0)
-            
+
             texture_path = self.resolve_mesh_path(zsc_mat.path, base_path)
             if texture_path:
                 try:
-                    tex_node.image = bpy.data.images.load(str(texture_path))
-                except:
-                    pass
-            
-            links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
-            
-            # The game shaders always sample the texture alpha channel, so
-            # wire it whenever the texture carries one, multiplied by material alpha.
-            has_tex_alpha = tex_node.image is not None and tex_node.image.channels == 4
-            if has_tex_alpha or zsc_mat.alpha_enabled or zsc_mat.alpha != 1.0:
-                if has_tex_alpha and zsc_mat.alpha != 1.0:
-                    mult = nodes.new(type='ShaderNodeMath')
-                    mult.operation = 'MULTIPLY'
-                    mult.location = (-200, -250)
-                    mult.inputs[1].default_value = zsc_mat.alpha
-                    links.new(tex_node.outputs['Alpha'], mult.inputs[0])
-                    links.new(mult.outputs['Value'], bsdf.inputs['Alpha'])
-                elif has_tex_alpha:
-                    links.new(tex_node.outputs['Alpha'], bsdf.inputs['Alpha'])
-                else:
-                    bsdf.inputs['Alpha'].default_value = zsc_mat.alpha
-                if zsc_mat.alpha_test is not None:
-                    mat.blend_method = 'CLIP'
-                    mat.alpha_threshold = zsc_mat.alpha_test
-                else:
-                    mat.blend_method = 'HASHED'
-                if hasattr(mat, 'show_transparent_back'):
-                    mat.show_transparent_back = False
-        
+                    tex_node.image = bpy.data.images.load(
+                        str(texture_path), check_existing=True)
+                    texture_loaded = True
+                except Exception as e:
+                    self.report({'WARNING'},
+                        f"Failed to load texture {Path(texture_path).name}: {e}")
+
+            if texture_loaded:
+                links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
+            else:
+                nodes.remove(tex_node)
+
+        # Alpha mode matches the client (objects.rs): only alpha_enabled
+        # enables transparency (Mask with threshold, else Blend); texture
+        # alpha alone never does.
+        if zsc_mat.alpha_enabled:
+            if zsc_mat.alpha_test is not None:
+                mat.blend_method = 'CLIP'
+                mat.alpha_threshold = zsc_mat.alpha_test
+            else:
+                mat.blend_method = 'BLEND'
+            if texture_loaded:
+                links.new(tex_node.outputs['Alpha'], bsdf.inputs['Alpha'])
+            else:
+                bsdf.inputs['Alpha'].default_value = zsc_mat.alpha
+            if hasattr(mat, 'show_transparent_back'):
+                mat.show_transparent_back = False
+        else:
+            mat.blend_method = 'OPAQUE'
+
         links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])
-        
-        if zsc_mat.two_sided:
-            mat.use_backface_culling = False
-        
+
+        # Single-sided materials must cull backfaces (client cull_mode).
+        mat.use_backface_culling = not zsc_mat.two_sided
+
         return mat

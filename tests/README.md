@@ -20,6 +20,8 @@ guard against regressions.
 | test_dds_alpha.py | pure python | DXT3 alpha masks are straight alpha (no premultiplied black) |
 | test_blender_import.py | Blender headless | full `.zon` import via the operator |
 | test_blender_materials.py | Blender headless | UV maps, per-pair materials, layer2 rotation, DDS alpha, Non-Color + Gamma |
+| test_eft_roundtrip.py | pure python | every EFT/PTL file saves back byte-identically; effective-path rules |
+| test_blender_eft.py | Blender headless | `.eft` import (slots, meshes, particle preview, TRAJ baking) + export round-trip |
 
 ## Test data
 
@@ -49,6 +51,7 @@ python tests/test_til_mapping.py
 python tests/test_coordinates.py
 python tests/test_texture_stats.py
 python tests/test_dds_alpha.py
+python tests/test_eft_roundtrip.py
 ```
 
 Blender headless tests (must run with the Blender executable so `bpy` exists):
@@ -56,6 +59,7 @@ Blender headless tests (must run with the Blender executable so `bpy` exists):
 ```
 "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --factory-startup --python tests/test_blender_import.py
 "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --factory-startup --python tests/test_blender_materials.py
+"C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --factory-startup --python tests/test_blender_eft.py
 ```
 
 All scripts exit with code 0 on success, 1 on failure.

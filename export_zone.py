@@ -43,6 +43,16 @@ def f32(value):
     return struct.unpack("<f", struct.pack("<f", value))[0]
 
 
+def resolve_ifo_path(zone_dir, bx, by):
+    """IFO path for a block, tolerating lowercase extensions on
+    case-sensitive filesystems (data files use uppercase .IFO)."""
+    for ext in (".IFO", ".ifo"):
+        cand = os.path.join(zone_dir, f"{bx}_{by}{ext}")
+        if os.path.exists(cand):
+            return cand
+    return os.path.join(zone_dir, f"{bx}_{by}.IFO")
+
+
 def world_to_block(location):
     """(block_x, block_y) for a Blender world position, matching the game's
     block grid. Terrain and objects lie in the X/Y plane in Blender
@@ -232,7 +242,7 @@ class ExportZone(bpy.types.Operator):
 
         ifo_cache = {}
         for (bx, by) in sorted(block_keys):
-            ifo_path = os.path.join(zone_dir, f"{bx}_{by}.IFO")
+            ifo_path = resolve_ifo_path(zone_dir, bx, by)
             if ifo_path not in ifo_cache:
                 if os.path.exists(ifo_path):
                     try:
@@ -261,7 +271,7 @@ class ExportZone(bpy.types.Operator):
 
         for (bx, by, kind), indices in removed_by_block.items():
             block_type = IFO_BLOCK.get(kind)
-            ifo_path = os.path.join(zone_dir, f"{bx}_{by}.IFO")
+            ifo_path = resolve_ifo_path(zone_dir, bx, by)
             ifo = ifo_cache.get(ifo_path)
             if ifo is None:
                 continue
@@ -291,7 +301,7 @@ class ExportZone(bpy.types.Operator):
 
         # Update existing instances
         for (bx, by), objs in by_block.items():
-            ifo_path = os.path.join(zone_dir, f"{bx}_{by}.IFO")
+            ifo_path = resolve_ifo_path(zone_dir, bx, by)
             ifo = ifo_cache.get(ifo_path)
             if ifo is None:
                 continue
@@ -359,7 +369,7 @@ class ExportZone(bpy.types.Operator):
                 # block, relocate it there (as a new entry).
                 cur_bx, cur_by = world_to_block(obj.matrix_world.translation)
                 if (cur_bx, cur_by) != (bx, by):
-                    new_path = os.path.join(zone_dir, f"{cur_bx}_{cur_by}.IFO")
+                    new_path = resolve_ifo_path(zone_dir, cur_bx, cur_by)
                     if new_path not in ifo_cache:
                         if os.path.exists(new_path):
                             try:
@@ -402,7 +412,7 @@ class ExportZone(bpy.types.Operator):
         # Append new objects (rose_is_new, plus duplicated instances)
         for obj in list(new_objects) + duplicate_objects:
             bx, by = world_to_block(obj.matrix_world.translation)
-            ifo_path = os.path.join(zone_dir, f"{bx}_{by}.IFO")
+            ifo_path = resolve_ifo_path(zone_dir, bx, by)
             if ifo_path not in ifo_cache:
                 if os.path.exists(ifo_path):
                     try:
@@ -572,7 +582,12 @@ class AddZoneObject(bpy.types.Operator):
         rel_mesh_path = f"3Ddata/MODELS/ZMS/{name}.zms"
         abs_mesh_path = os.path.join(root_3ddata, "MODELS", "ZMS", f"{name}.zms")
         os.makedirs(os.path.dirname(abs_mesh_path), exist_ok=True)
-        error = export_zms_mesh_object(mesh_obj, abs_mesh_path, report=self.report)
+        # Mirror into ROSE-local space (x, -y, z): the inverse of the zone
+        # importers' mirrored mesh loading, so the game reads back the same
+        # bytes the importers consumed.
+        error = export_zms_mesh_object(mesh_obj, abs_mesh_path,
+                                       convert_coordinates=True,
+                                       report=self.report)
         if error:
             self.report({'ERROR'}, f"ZMS export failed: {error}")
             return {'CANCELLED'}

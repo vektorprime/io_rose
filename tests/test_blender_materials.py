@@ -78,14 +78,29 @@ def main():
             two_layer += 1
             mix = next(n for n in m.node_tree.nodes if n.type == "MIX")
             assert mix.data_type == "RGBA"
-            # factor must be driven by the layer2 texture alpha
-            for link in m.node_tree.links:
-                if link.to_socket.name == "Factor":
-                    assert link.from_socket.name == "Alpha", "mix factor not from texture alpha"
-            # layer2 texture must read UVMap_rot
+            # factor must be driven by the layer2 texture alpha: an empty
+            # loop body would pass vacuously, so require the link to exist.
+            factor_links = [link for link in m.node_tree.links
+                            if link.to_socket.name == "Factor"]
+            assert factor_links, f"{m.name}: MIX factor not driven"
+            for link in factor_links:
+                assert link.from_socket.name == "Alpha", "mix factor not from texture alpha"
+            # layer2 texture must read UVMap_rot ...
             attrs = [n for n in m.node_tree.nodes if n.type == "ATTRIBUTE"]
             assert any(a.attribute_name == "UVMap_rot" for a in attrs), \
                 f"{m.name} lacks UVMap_rot attribute node"
+            # ... and layer1 must read the unrotated UVMap (an unlinked
+            # Vector input would follow the active layer, i.e. UVMap_rot).
+            assert any(a.attribute_name == "UVMap" for a in attrs), \
+                f"{m.name} lacks UVMap attribute node for layer1"
+            tex_nodes = [n for n in m.node_tree.nodes if n.type == "TEX_IMAGE"]
+            vector_links = {link.to_node.name: link.from_node.attribute_name
+                            if link.from_node.type == "ATTRIBUTE" else None
+                            for link in m.node_tree.links
+                            if link.to_socket.name == "Vector"}
+            fed = {vector_links.get(t.name) for t in tex_nodes}
+            assert "UVMap" in fed and "UVMap_rot" in fed, \
+                f"{m.name}: textures not pinned to UVMap + UVMap_rot (got {fed})"
     print(f"two-layer blend materials: {two_layer}")
     assert two_layer > 0, "no two-layer materials found"
 
