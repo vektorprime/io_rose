@@ -1,12 +1,38 @@
+This plugin lets you use Blender 4.5 to view and modify game assets for ROSE Online (`bl_info` requires Blender 4.5+, `__init__.py:4`). Original authors: Ralph Minderhoud and Ryko (see `__init__.py:3`).
 
-This plugin allows you to use Blender 4.5 and modify game asets for Rose Online. I am not the original creator of this, I just had AI modify it.
+NOTE: Loading a full `.zon` (e.g. JDT01: 16 tiles x 64x64 quads = 65536 polys, `tests/test_blender_import.py:61`) is heavy - expect minutes on slower PCs. The previous "3-10 minutes" claim is workload/hardware dependent, not a benchmark.
 
-NOTE: Loading a .zon file can take 3-10 minutes depending on your PC specs.
+## Import (`File > Import`, `__init__.py:73-85`)
 
-Once installed, you have these menus:
+| Menu text | Operator | Source |
+|---|---|---|
+| ROSE Zone (Converted Terrain + Assets) | `import_combined_zone.zon` | `import_combined_zone.py` (Bevy-converter Y-up path, `65 - block_y` flip) |
+| ROSE Map (.zon) | `import_map.zon` | `import_map.py` (direct .zon, terrain + IFO objects) |
+| ROSE Terrain Only (.zon) | `import_terrain.zon` | `import_terrain.py` |
+| Converted ROSE Terrain (.mesh.bin) | `import_converted_terrain.mesh_bin` | `import_converted_terrain.py` |
+| ROSE Scene (.zsc) | `rose.import_zsc` | `import_zsc.py` |
+| ROSE Armature (.zmd) | `rose.import_zmd` | `import_zmd.py` |
+| ROSE Mesh (.zms) | `rose.import_zms` | `import_zms.py` |
+| ROSE Mesh with Skeleton (.zms) | `rose.import_zms_zmd` | `import_zms_zmd.py` (meshes with skeletons + textures) |
+| ROSE Animation (.zmo) | `rose.import_zmo` | `import_zmo.py` |
+| ROSE Effect (.eft) | `rose.import_eft` | `import_eft.py` |
+| ROSE Wings Enhancer (batch) | `rose.enhance_wings` | `enhance_wings.py` |
 
-<img width="666" height="895" alt="image" src="https://github.com/user-attachments/assets/26c65a69-319a-4989-b0a6-fbd955472b04" />
+Use `ROSE Map (.zon)` for zones/maps; `Converted Terrain` / `Combined Zone` only for Bevy-converter `.mesh.bin` output (different `65 - block_y` coordinate path, see `architecture/rose-offline-client-zone-loading.md`).
 
+## Export (`File > Export`, `__init__.py:66-71`)
+
+| Menu text | Operator | Source |
+|---|---|---|
+| ROSE Mesh (.zms) | `rose.export_zms` | `export_zms.py` |
+| ROSE Animation (.zmo) | `rose.export_zmo` | `export_zmo.py` |
+| ROSE Effect (.eft) | `rose.export_eft` | `export_eft.py` |
+| ROSE Zone (.zon) - Save Edited Zone | `rose.export_zone` | `export_zone.py` (diff-based IFO/HIM save, see `architecture/zone-exporter.md`) |
+| ROSE Object - Add Selected Mesh to Zone | `rose.add_zone_object` | `export_zone.py` |
+
+Hidden (F3 search, not in menu): `rose.mark_zone_deleted` (`Mark Selected for Zone Deletion`, `export_zone.py:521-522`). No toggle - clearing needs manual reset of scene `rose_deleted_objects`.
+
+Docs: `architecture/` (file formats, client loading, importer pipeline, exporter). Tests: `tests/README.md`.
 
 You can load meshes with skeletons and textures:
 <img width="1046" height="593" alt="image" src="https://github.com/user-attachments/assets/21a00c97-28ed-4567-ae71-cea4201e9ba2" />

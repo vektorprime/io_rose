@@ -35,7 +35,8 @@ rose-offline-client/                the Bevy game
    (map-editor saved files override VFS data).
 2. Parses the ZON and both ZSC files (CNST + DECO).
 3. `load_block_files_direct()` loads every `{block_x}_{block_y}.HIM` file from
-   the ZON's own directory, plus the matching TIL/IFO/LIT files.
+   the ZON's own directory, plus the matching TIL/IFO/LIT files. The Blender
+   addon (`import_map.py:684-712`) loads HIM/TIL/IFO only and ignores LIT.
 
 ### The 64x64 block grid
 
@@ -58,31 +59,52 @@ rose-offline-client/                the Bevy game
 
 ## World-space mapping (terrain)
 
-`src/zone_loader.rs` and `src/zone_loader/spawning/terrain.rs`:
+`src/zone_loader.rs` and `src/zone_loader/spawning/terrain.rs` (Bevy Y-up
+target). Do not conflate with the Blender Z-up mapping below:
 
-- Block world size = `16 * grid_per_patch * grid_size` (typically 160 units;
-  JDT01: grid_size = 250 cm, grid_per_patch = 0.04).
-- Block origin: `offset_x = 160.0 * block_x`, `offset_y = 160.0 * (65 - block_y)`.
-  **block_y = 0 is the north/top of the map (y axis inverted).**
-- Entity transform: `(offset_x - 5200.0, 0.0, -offset_y + 5200.0)` (5200 cm = 52 m).
-- Each block is 16x16 terrain tiles; each tile is a 4x4 quad grid -> 65x65 HIM
-  samples per block.
+- Block world size = `64 * grid_size / 100` meters (== `16 * grid_per_patch
+  * grid_size / 100`; JDT01: grid_size = 250 cm -> 160 m).
+- Bevy block origin: `offset_x = 160.0 * block_x`,
+  `offset_y = 160.0 * (65 - block_y)`.
+  **In the Bevy path block_y = 0 is the north/top of the map (y axis inverted).**
+- Bevy entity transform: `(offset_x - 5200.0, 0.0, -offset_y + 5200.0)`,
+  all in meters (5200 m offset, not 5200 cm).
+- Each block is 16x16 TIL patches; each patch is a 4x4 quad grid -> 65x65 HIM
+  samples for a full JDT01 block (HIM size comes from the file header,
+  `rose/him.py:27-28`, not fixed).
 - HIM heights are centimeters: divided by 100.0 to get meters.
-- Heightmap sample spacing: 2.5 m (160 units / 64 quads).
+- Heightmap sample spacing: 2.5 m (160 m / 64 quads).
 - `get_terrain_height(x, y)`: `block_x = x / block_size`,
   `block_y = 65.0 - (y / block_size)`, then bilinear interpolation over the
   HIM (`get_clamped`).
 - `get_tile_index()`: same mapping, returns `tile.layer2 + tile.offset2`.
+  The Blender terrain shader instead uses the full pair
+  `(layer1+offset1, layer2+offset2)` (`rose/utils.py:398-405`).
 
-## Coordinate transforms (Rose -> Bevy)
+Blender Z-up mapping (`import_map.py:742-743,753-756`,
+`export_zone.py:56-63`): block corner = `160 * block_coord - 5200` m on both
+axes, no `65 -` flip. Block lookup is
+`(floor((X + 5200) / 160), floor((Y + 5200) / 160))`. The `65 - block_y`
+flip only applies to the Bevy-converter variants
+(`import_combined_zone.py:30-37`, `import_converted_terrain.py:378-386`).
 
-Rose positions are in centimeters in a Y-up (Z-up in some docs) left-handed
-system; Bevy is right-handed Y-up meters:
+## Coordinate transforms
 
+Rose file data are centimeters, right-handed Z-up
+(`rose/utils.py:314-315`: X = right, Y = forward, Z = up).
+
+- Rose -> Bevy (right-handed Y-up meters):
 ```
 position: (x, y, z) -> (x, z, -y) / 100.0
 rotation: (x, y, z, w) -> (x, z, -y, w)
 scale:    (x, y, z) -> (x, z, y)
+```
+- Rose -> Blender (`import_map.py`, `rose/utils.py:306-327`,
+  `export_zone.py:72-85`; both Z-up, no axis swap):
+```
+position: (x, y, z) cm -> (x, -y, z) / 100.0 m
+rotation: IFO XYZW (x, -y, z, w) <-> Blender WXYZ (w, x, y, z)
+scale:    unchanged
 ```
 
 ## Consumers of terrain data

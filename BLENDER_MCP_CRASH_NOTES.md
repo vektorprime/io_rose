@@ -1,4 +1,6 @@
-# Blender MCP Crash Notes
+# Blender MCP Crash Notes (not io_rose docs - different addon)
+
+> This file documents the Blender MCP remote-control addon (`addon.py`, command-queue over socket), not `io_rose`. Kept here only for the Woopie-fur task history and the Incident 5 triage rule below. Do not read as `io_rose` architecture.
 
 Lessons from crashes/freezes during the Woopie Chef fur task (Blender 4.5.13 LTS, commit daeeeca98fb0, 2026-08-24). Add-on: Blender MCP (addon.py, command-queue over socket).
 

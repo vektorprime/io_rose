@@ -77,15 +77,16 @@ things should exist*. Geometry appears exactly where the eye expects volume.
 - Verified: cmp2_head.png, cmp2_full34.png (temp shots) — hat, scarf, pocket,
   tongue and teeth now read as 3D from normal game zoom in 3/4 view.
 
-## Results
-- Verts: 572 → 2530 total (×4.4, within the ×10 budget). Skin weights/UVs preserved.
+## Results (superseded by Follow-up pass above - see vertex-count note)
+- First pass: verts 572 → 2530 total (×4.4, within the ×10 budget). Skin weights/UVs preserved.
+- Follow-up "I don't see any difference" pass (current): body 3715 + head 3180 + tail 97 = 6992 total (×12.2 original, slightly above the ×10 guidance - mask density required for bulges). Use 6992 as the current total, not 2530.
 - What now reads as 3D: scarf band + knot + tie ends, apron bib/pocket/waistband/bow,
-  chef-hat crown, tongue (protrudes past the jaws, tip droops), nose/eye domes,
-  ear cavities, tail volume, plus micro-relief bump for teeth dots/fur/cloth folds.
-- Work file: `%TEMP%\opencode\woopie\woopie_chef_upgraded.blend`
+  chef-hat crown, tongue (protrudes past the jaws, tip droops; +2.5 cm with 3 cm forward droop in follow-up), nose/eye domes,
+  ear cavities, tail volume, plus micro-relief bump for fur/cloth folds and +1.4 cm real teeth-arch bumps in the follow-up (earlier "teeth bump-only" note below refers to the first pass only).
+- Work file: `%TEMP%\opencode\woopie\woopie_chef_upgraded.blend` (outside repo, unverifiable here)
   (hidden `Woopie_BAK` collection with pre-change copies is included for diff/undo).
 - Before/after image pairs: `%TEMP%\opencode\woopie\shots\after_*.png` vs the
-  earlier front/back/right/head/torso captures.
+  earlier front/back/right/head/torso captures (outside repo, unverifiable here).
 
 ## Known limits / next ideas
 - Skirt flap & armpit gaps are topology issues from the original mesh (open seams,

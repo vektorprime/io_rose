@@ -12,8 +12,8 @@ guard against regressions.
 | test_zone_files.py | pure python | ZON/HIM/TIL/IFO parsing; `"end"` texture sentinel |
 | test_zone_roundtrip.py | pure python | every ZON/HIM/TIL/IFO file saves back byte-identically (the zone exporter's safety net) |
 | test_helpers.py | pure python | UV rotation, TIL patch rotation, texture pair logic |
-| test_sparse_grid.py | pure python | face/material count alignment on sparse tile grids |
-| test_terrain_build.py | pure python | full terrain build + stitch faces on real data (mirrors import_map.py) |
+| test_sparse_grid.py | pure python | face/material count alignment on sparse tile grids (main quads only, no stitch) |
+| test_terrain_build.py | pure python | full terrain build, main quads only, no stitch faces, on real data (mirrors import_map.py) |
 | test_til_mapping.py | pure python | TIL 16x16 patch -> 4x4 quad mapping (`vx // 4`) |
 | test_coordinates.py | pure python | terrain/object world-space alignment (block corner = 160*block - 5200 m) |
 | test_texture_stats.py | pure python | two-layer texture pair statistics |
@@ -64,10 +64,13 @@ Blender headless tests (must run with the Blender executable so `bpy` exists):
 
 All scripts exit with code 0 on success, 1 on failure.
 
-## Known data values (JDT01, update if the map data changes)
+## Known data values (JDT01, update if the map data changes; only asserted values are enforced)
 
-- ZON: 64x64 grid, grid_size 250.0, 131 tiles, 29 textures (after `"end"` sentinel trim)
-- 16 tile files on disk: 31_30 .. 34_33 (sparse map)
-- 35 distinct (layer1, layer2) texture pairs
-- Rotations present: 1 (None), 2 (FlipH), 3 (FlipV), 4 (Flip)
-- All DDS textures are DXT3 (4 channels, alpha = splat mask)
+- ZON: 64x64 grid (printed, not asserted), grid_size 250.0 (asserted), 131 tiles (unasserted, update if data changes), 29 textures after `"end"` sentinel trim (asserted, `test_zone_files.py:30`)
+- Tile files on disk are a sparse subset (e.g. 16 files `31_30..34_33` on the tested checkout - comment-only, `test_terrain_build.py:118`, not asserted)
+- 35 distinct (layer1, layer2) texture pairs (asserted, `test_texture_stats.py:26-27`)
+- Rotations present: 1 (None), 2 (FlipH), 3 (FlipV), 4 (Flip) (asserted counts `{1:2859,2:518,3:469,4:250}`, `test_blender_materials.py:70-71`)
+- All DDS textures are DXT3 (asserted, `test_dds_alpha.py:37`)
+- Round-trip covers all ZON/HIM/TIL/IFO files found (no fixed 49-file count asserted)
+
+Pure-python tests must run from the addon root (`python tests/test_*.py`) so `import _paths` resolves; only some scripts add the tests dir to `sys.path` themselves. Blender tests need `bpy` plus `ROSE_CLIENT_3DDATA` data (`tests/_paths.py:11-31`).

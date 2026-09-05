@@ -14,12 +14,23 @@ io_rose/
   import_combined_zone.py   combined zone import variant
   import_converted_terrain.py
   import_zms.py / import_zms_zmd.py / import_zmd.py / import_zmo.py / import_zsc.py
+  import_eft.py             .eft effect import (slots, meshes, particle preview)
   export_zms.py             mesh export
+  export_zmo.py             animation export
+  export_eft.py             effect export
+  export_zone.py            zone save (IFO/HIM diff + new ZMS/ZSC/DDS)
+  enhance_wings.py          back-slot wing batch enhancer
   test_zon.py               ZON parser self-test
   rose/                     format parsers (pure Python, no bpy):
-    him.py til.py zon.py ifo.py zsc.py zms.py zmd.py zmo.py utils.py
+    him.py til.py zon.py ifo.py zsc.py zms.py zmd.py zmo.py eft.py ptl.py dds.py utils.py
   architecture/             this documentation
 ```
+
+`import_combined_zone.py` / `import_converted_terrain.py` are Bevy-converter
+variants (Y-up converter output, `65 - block_y` flip); `import_map.py` /
+`import_terrain.py` are the direct `.zon` path (Blender Z-up, no flip).
+`import_zms/zmd/zmo/zsc/eft` have one operator each, see `__init__.py` menu
+table. `export_zmo.py` exists (animation export).
 
 Parsers depend only on `struct` and can be run/tested outside Blender.
 
@@ -42,11 +53,14 @@ Parsers depend only on `struct` and can be run/tested outside Blender.
      accumulation and no Y negation: the client's terrain formula already
      folds in the Y flip so it aligns with the object conversion
      `(x, -y, z)/100`.
-   - Main quads per tile: `(w-1) x (l-1)` faces.
-   - Inter-tile stitch faces: X-edge, Y-edge, and corner quads that bridge
-     the shared sample edges between adjacent tiles. Tile-to-tile stride is
-     64 samples (160 m), matching the client's block size - never 65, or
-     adjacent tiles drift 2.5 m apart.
+    - Main quads per tile: `(w-1) x (l-1)` faces.
+    - No inter-tile stitch faces: tiles already abut exactly in absolute
+      world space (edge vertices coincide), so stitched quads would be
+      degenerate zero-area faces. This matches the Rust client
+      (`terrain.rs`), which spawns separate blocks without stitching
+      (`import_map.py:780-783`). Tile-to-tile stride is 64 samples
+      (160 m), matching the client's block size - never 65, or adjacent
+      tiles drift 2.5 m apart.
 6. **Materials**: the TIL patch grid (16x16 patches, each covering a 4x4
    quad area) maps to ZON tiles with **two texture layers**. The addon
    replicates the game shader exactly:
@@ -62,20 +76,15 @@ Parsers depend only on `struct` and can be run/tested outside Blender.
 
 ## Face ordering contract (critical!)
 
-Faces are appended per tile in this order, and the material-index pass must
-count them in exactly the same order:
+Faces are main-grid quads only (no stitch faces), in tile-major order
+matching the generation loop (`import_map.py:834-835`). The material-index
+pass must iterate tiles in exactly the same order and skip the same missing
+tiles (`if not tiles.hims[ty][tx]: continue`), or `face_idx` drifts and
+polygons get wrong material slots.
 
-1. Main quads: `(length-1) * (width-1)` per tile
-2. X-edge stitch faces: `(length-1)` per tile (only if right neighbor exists)
-3. Y-edge stitch faces: `(width-1)` per tile (only if bottom neighbor exists)
-4. Corner stitch face: 1 per tile (only if all three neighbors exist)
+## Sparse tiles: history (2026-07-31) and current behavior
 
-Any change to one loop must be mirrored in the other, or `face_idx` drifts
-and polygons get wrong material slots.
-
-## Sparse tiles: the 2026-07-31 bug fix
-
-Symptom (importing JDT01.ZON):
+Original symptom (importing JDT01.ZON, old stitching code):
 
 ```
 File "import_map.py", line 736, in execute
@@ -83,24 +92,18 @@ File "import_map.py", line 736, in execute
 TypeError: 'NoneType' object is not subscriptable
 ```
 
-Root cause: the stitching loop used `tiles.indices[y][x + 1]` and
-`tiles.indices[y + 1][x]` unconditionally. On sparse maps the neighbor tile
-never loaded, so its slot was `None`. The Rust client handles this by
-skipping `None` blocks; the addon did not.
+Old root cause: the then-existing stitching loop used
+`tiles.indices[y][x + 1]` and `tiles.indices[y + 1][x]` unconditionally with
+`has_x_neighbor` / `has_y_neighbor` / `has_xy_neighbor` guards. On sparse
+maps the neighbor tile never loaded, so its slot was `None`.
 
-Fix (matching the Rust behavior):
+Current behavior: stitching was removed entirely (see above). Sparse maps
+are handled by skipping missing tiles in both the face-generation loop and
+the material-index loop. The Rust client likewise skips `None` blocks.
 
-- Compute per tile:
-  `has_x_neighbor`, `has_y_neighbor`, `has_xy_neighbor` (all three neighbors
-  for the corner face - the old code only checked two, which could still
-  crash via the unguarded `right` access).
-- The stitching loop only emits stitch faces when the neighbor exists.
-- The material-index loop uses the identical predicates so face counting
-  stays aligned.
-
-Verified: 10 sparse-grid configurations (including JDT01 with tiles forced
-missing) all keep face counts aligned; no crash; all face vertex indices
-valid.
+Verified: `tests/test_sparse_grid.py` (face/material count alignment on
+sparse grids) and `tests/test_terrain_build.py` (full build, no stitch);
+all face vertex indices valid.
 
 ## Assets on terrain: the 2026-08-01 coordinate fix
 

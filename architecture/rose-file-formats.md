@@ -36,7 +36,7 @@ Per block header:
 | Value | Block | Contents (Python parser) |
 |-------|-------|--------------------------|
 | 0 | ZoneInfo | zone_type, width, length, grid_count, grid_size (f32, in cm), xcount, ycount, then width*length `Position` entries (used flag + x,y f32) |
-| 1 | Spawns | count, then per spawn: position x, z, y (f32, z before y) + name (u8-length-prefixed) |
+| 1 | Spawns | count, then per spawn: position x, y, z (f32 sequential, `read_vector3_f32`; older addon code swapped Y/Z) + name (u8-length-prefixed) |
 | 2 | Textures | count, then per texture: path (u8-length-prefixed). The list ends with a literal `"end"` sentinel entry - the Rust client stops loading at the first `"end"` (see `spawning.rs`), and the Python parser trims it. |
 | 3 | Tiles | count, then per tile: layer1, layer2, offset1, offset2 (u32), blending (u32 != 0), rotation (u32), tile_type (u32) |
 | 4 | Economy | name, is_underground, music path, sky path, economy rates |
@@ -64,14 +64,16 @@ grid_count=4, grid_size=250.0).
 Parser: `rose/him.py`, Rust: `him.rs`.
 
 ```
--- 4       Width (u32)     -> 65 for a full block
--- 4       Height (u32)    -> 65 for a full block (field called "length")
--- 8       Skip            (grid_count i32 + patch_scale f32)
+-- 4       Width (u32)     -> 65 for a full JDT01 block
+-- 4       Height (u32)    -> 65 for a full JDT01 block (field called "length")
+-- 8       Header          (grid_count u32 + patch_scale f32, preserved on save)
 -- 4*w*h   Heights (f32, row-major, values in centimeters)
+-- N       Tail            (e.g. legacy "Quad\0" quadtree footer, preserved verbatim)
 ```
 
-A 65x65 HIM is a full block: 16x16 terrain tiles, each tile a 4x4 quad grid
-(17x17 samples per tile, shared edge samples).
+A 65x65 HIM is a full block: 16x16 TIL patches, each patch a 4x4 quad grid
+(17x17 samples per patch, shared edge samples). Size comes from the file
+header (`rose/him.py:27-28`), 65x65 is the JDT01 instance, not a constant.
 
 Rust accessor: `get_clamped(x, y)` clamps coordinates into `[0, w-1] x [0, h-1]`.
 
@@ -88,10 +90,10 @@ Per tile:
 ```
 
 Both implementations advance 7 bytes per tile, so parsing stays in sync. The
-`tile` value indexes `zon.tiles[]`; the texture index is
-`zon.tiles[i].layer1 + zon.tiles[i].offset1` (addon) /
-`layer2 + offset2` (Rust `get_tile_index`). Whether layer1 or layer2 is the
-correct base is an open discrepancy to verify visually.
+`tile` value indexes `zon.tiles[]`; the addon uses the full pair
+`l1 = layer1 + offset1, l2 = layer2 + offset2` (out-of-range falls back to
+texture 0, `rose/utils.py:398-405`). The Rust `get_tile_index()` returns
+`layer2 + offset2` only; the Blender two-layer shader needs both.
 
 ## IFO - Object placement
 
@@ -147,12 +149,19 @@ XYZW (x first).
   z_write, blend_mode, specular, alpha f32, glow type + color), effect paths,
   then objects with parts; parts use a property loop (`property_id u8,
   size u8, data`): 1=position, 2=rotation (WXYZ), 3=scale, 4=skip 16,
-  5=bone_index, 6=dummy_index, 7=parent (0=None else id-1), 29=collision,
-  30=animation_path, 0=end.
-- **ZMS** (mesh): magic `ZMS0005`..`ZMS0008`. Flag bitmask: POSITION=2,
-  NORMAL=4, COLOR=8, BONE_INDEX=16, BONE_WEIGHT=32, TANGENT=64, UV1..UV4 =
-  128..1024. v5/6: u32 counts, per-vertex u32 ID, positions scaled by 100.0
-  (must divide). v7/8: u16 counts, no vertex IDs.
+  5=bone_index, 6=dummy_index, 7=parent (0=None else id-1), 8-28 reserved
+  (skip), 29=collision, 30=animation_path, 31/32=skip u16, 0=end
+  (`rose/zsc.py:309-356`).
+- **ZMS** (mesh): magic `ZMS0005`..`ZMS0009` (`ZMS0009` uses u32 counts/indices,
+  `rose/zms.py:134-139`). Flag bitmask: POSITION=2, NORMAL=4, COLOR=8,
+  BONE_WEIGHT=16, BONE_INDEX=32, TANGENT=64, UV1..UV4 = 128..1024
+  (`rose/zms.py:5-15`, FIXED ORDER). v5/6: u32 counts, per-vertex u32 ID,
+  positions scaled by 100.0 (must divide). v7/8: u16 counts, no vertex IDs.
+- **EFT/PTL** (effects/particles): parsers `rose/eft.py`, `rose/ptl.py`;
+  operators `import_eft.py` / `export_eft.py` (slots, meshes, particle
+  preview, TRAJ baking). Byte-exact round-trip covered by
+  `tests/test_eft_roundtrip.py` + `tests/test_blender_eft.py`. No separate
+  binary-layout section yet - see parser source until documented.
 - **ZMD** (skeleton): `ZMD0002`/`ZMD0003`, bones with parent index, name,
   position, rotation (WXYZ). v3 dummy bones carry rotation; v2 use identity.
 - **ZMO** (animation): `ZMO0002`, fps/frames/channel count, channel types are

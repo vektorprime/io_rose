@@ -10,8 +10,7 @@ addon relates to the Rust reference implementation
 |----------|-------|
 | [rose-file-formats.md](rose-file-formats.md) | Binary layouts of ZON / HIM / TIL / IFO (ground truth: `rose-file-readers` crate). |
 | [rose-offline-client-zone-loading.md](rose-offline-client-zone-loading.md) | How the Bevy client loads zones: 64x64 block grid, sparse tiles, world-space mapping, coordinate transforms. |
-| [blender-importer.md](blender-importer.md) | How `import_map.py` imports `.zon` maps: pipeline, mesh generation, inter-tile stitching, materials, pitfalls. |
-| [zone-terrain-transparency-issue.md](zone-terrain-transparency-issue.md) | Investigation of the "black unblended textures" report: DXT3 alpha masks, blend verification, scene lighting. |
+| [blender-importer.md](blender-importer.md) | How `import_map.py` imports `.zon` maps: pipeline, mesh generation (main quads only, no stitching), materials, pitfalls. |
 | [zone-exporter.md](zone-exporter.md) | The zone save feature: byte-exact writers, round-trip metadata, diff-based IFO/HIM export, backups, new-mesh flow. |
 
 ## Key takeaways from the 2026-07-31 session (sparse-tile crash)
@@ -21,12 +20,14 @@ addon relates to the Rust reference implementation
 2. The Rust client explicitly supports missing tiles: each block is
    `Option<Box<ZoneLoaderBlock>>`, missing blocks are skipped at spawn, and
    height/tile lookups fall back to `0.0` / `0`.
-3. The Blender importer previously assumed every neighbor tile exists when
-   stitching inter-tile faces, crashing with
+3. The Blender importer previously built inter-tile stitch faces and assumed
+   every neighbor tile exists, crashing with
    `TypeError: 'NoneType' object is not subscriptable` on sparse maps.
-4. The fix (in `import_map.py`) guards every neighbor access with
-   `has_x_neighbor` / `has_y_neighbor` / `has_xy_neighbor` in **both** the
-   face-stitching loop and the material-index loop, keeping face counts aligned.
+4. Stitching was then removed entirely (`import_map.py:780-783`): faces are
+   main-grid quads only, and both the generation loop and the
+   material-index loop skip missing tiles (`if not tiles.hims[ty][tx]`).
+   The old `has_x_neighbor` / `has_y_neighbor` / `has_xy_neighbor` guards
+   no longer exist - do not re-add them.
 
 ## 2026-08-01 session (assets not on terrain)
 

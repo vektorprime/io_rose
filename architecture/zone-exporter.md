@@ -17,7 +17,7 @@ is picked up immediately.
 |---|---|---|
 | Object moved/rotated/scaled | `{bx}_{by}.IFO` (only its block) | `rose/ifo.py` `save()` |
 | Object deleted (marked) | `{bx}_{by}.IFO` | same |
-| Object relocated across blocks | old + new `{bx}_{by}.IFO` | same |
+| Object relocated across blocks | old `{bx}_{by}.IFO` saved; new-block entry is staged in cache but **not yet written (known bug, `export_zone.py:370-410`: `new_path` never appended to `written`)** | same |
 | Terrain sculpted | `{bx}_{by}.HIM` (only changed blocks) | `rose/him.py` `save()` |
 | New mesh added as zone object | `.ZMS` + ZSC append + optional `.DDS` | `export_zms.py` / `rose/zsc.py` / `rose/dds.py` |
 
@@ -27,7 +27,8 @@ economy, texture palette are out of scope for now).
 ## Safety model
 
 - **Byte-exact writers**: every parser in `rose/` can re-serialize the
-  file byte-for-byte (`tests/test_zone_roundtrip.py` verifies 49 files).
+  file byte-for-byte (`tests/test_zone_roundtrip.py` verifies all ZON/HIM/
+  TIL/IFO files in the test zone, e.g. 1 ZON + 16x3 block files for JDT01).
   Unparsed IFO block types (DeprecatedMapInfo, DeprecatedWater) and
   trailing data (e.g. the `"Quad\0"` HIM footer, orphan spawn-path data
   after the last IFO block) are preserved verbatim. Strings read with
@@ -37,8 +38,12 @@ economy, texture palette are out of scope for now).
   compares each object's current transform against the file (f32
   quantized, sign-normalized quaternions), and only rewrites blocks
   where something actually changed. A no-op save changes nothing.
-- **Backup**: every file about to be overwritten is copied to
-  `<zone_dir>/backup/<timestamp>/` first.
+- **Backup**: IFO files are copied to `<zone_dir>/backup/<timestamp>/`
+  before overwrite (`export_zone.py:493-501`). ZSC backups go to the ZSC's
+  own directory (`export_zone.py:650`), not `<zone_dir>/backup`. Known bug:
+  HIM files are currently saved *before* the backup runs
+  (`export_zone.py:485-488` vs `:493-495`), so the HIM backup is
+  post-overwrite - fix the order before relying on it.
 - **Ground truth**: the Rust map editor's save system
   (`rose-offline-client/src/map_editor/save/`) defined the IFO
   serialization layout; HIM/TIL writers match `coords.rs` exactly.
@@ -61,9 +66,11 @@ economy, texture palette are out of scope for now).
      copy as a **new placement** (the first claimant keeps the original
      IFO record).
    - Sculpt the `ROSE_Terrain` mesh with Blender tools.
-   - Delete objects: select them and run
-     `File > Export > Mark Selected for Zone Deletion` (they are hidden;
-     re-run to un-mark by clearing the scene's `rose_deleted_objects`).
+    - Delete objects: select them and run `rose.mark_zone_deleted`
+      (`Mark Selected for Zone Deletion`, registered but not in the Export
+      menu - run via F3 search). They are hidden and appended to the scene's
+      `rose_deleted_objects`; there is no toggle - to un-mark, manually
+      clear that scene property and unhide (`export_zone.py:520-550`).
    - Add a new object: select a mesh, run
      `File > Export > ROSE Object - Add Selected Mesh to Zone`
      (exports the mesh as `.ZMS`, appends a ZSC entry + optional
@@ -103,8 +110,10 @@ Terrain and objects share one absolute world space in Blender:
 
 - ZON block editing (spawns, economy) - the `save()` writer exists in
   `rose/zon.py`, no operator/UI yet.
-- TIL tile reassignment (writer exists), MOV walkability, ZMD/ZMO
-  animation export, DXT-compressed DDS (uncompressed RGBA8 is written;
-  the client's loader accepts both).
+- TIL tile reassignment (writer exists), MOV walkability, DXT-compressed
+  DDS (uncompressed RGBA8 is written; the client's loader accepts both).
+  ZMO animation export exists as `rose.export_zmo` (`export_zmo.py`);
+  EFT export exists as `rose.export_eft` (`export_eft.py`) and is not
+  covered here yet.
 - Editing non-DECO/CNST IFO blocks in the UI (NPCs, warps, monster
   spawns parse and round-trip but have no Blender representation).
