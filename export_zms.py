@@ -134,7 +134,7 @@ def _restore_bounding_box(obj, zms):
     """Write the imported bounding box back while the exported positions
     are exactly the imported ones (same order and float32 bits).
 
-    1979 of 2882 client files store a box that is not the min/max of their
+    1971 of 2882 client files store a box that is not the min/max of their
     positions, so the recomputed box breaks an unedited round trip. A moved
     vertex, or a world transform / mirror that moves them all, keeps the
     recomputed box.
@@ -749,10 +749,10 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
                 else:
                     v.normal = Vector3(n[0], n[1], n[2])
 
-        # Calculate bounding box (vec3 pmin, pmax)
+        # Calculate bounding box (vec3 pmin, pmax) in file units, like the
+        # positions it bounds: v5/v6 store both * 100 (already scaled above)
         if len(zms.vertices) > 0:
-            # Get positions (v5/v6 are already scaled, so divided back)
-            positions = _mesh_unit_positions(zms)
+            positions = [(v.position.x, v.position.y, v.position.z) for v in zms.vertices]
 
             min_x = min(p[0] for p in positions)
             min_y = min(p[1] for p in positions)

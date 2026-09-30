@@ -211,6 +211,9 @@ class ZMS:
         """
         self.flags = read_u32(f)  # int vertex_format
         _check_format_bits(self.flags)
+        # The box stays in file units (* 100, unlike the positions below):
+        # the importers stash it and the exporter writes it back verbatim,
+        # and rose-offline's ZmsFile::read_bounds reads it as centimeters
         self.bounding_box_min = read_vector3_f32(f)  # vec3
         self.bounding_box_max = read_vector3_f32(f)  # vec3
 

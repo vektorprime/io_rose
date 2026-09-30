@@ -13,8 +13,9 @@ Run with the Blender executable (requires bpy):
   deterministic sample of client files the exporter can reproduce.
 - The recorded box and skin stash only apply while they still describe the
   mesh: a moved vertex, world transform or topology edit recomputes the
-  box, and edited vertex weights (or any topology edit) export exactly as
-  without the stash (sorted, renormalized, padded with bone 0).
+  box (in file units: v5/v6 * 100, like the positions), and edited vertex
+  weights (or any topology edit) export exactly as without the stash
+  (sorted, renormalized, padded with bone 0).
 - Edited topology (subdivide, delete, flipped face) and objects without
   recorded import counts export empty strips / material face counts with
   an INFO report instead of the stale imported lists.
@@ -31,6 +32,7 @@ import importlib.util
 import math
 import mathutils
 import os
+import struct
 import sys
 import traceback
 
@@ -129,9 +131,17 @@ def box(z):
     return z.bounding_box_min.as_tuple(), z.bounding_box_max.as_tuple()
 
 
+def f32(x):
+    return struct.unpack("<f", struct.pack("<f", x))[0]
+
+
 def tight_box(z):
-    """Min/max of the positions (v7+; v5/v6 positions are read / 100)."""
+    """Min/max of the positions in file units, the box's units: v5/v6 store
+    both * 100 but are read with the positions / 100, and f32(p * 100) gives
+    back the stored float."""
     pos = [v.position.as_tuple() for v in z.vertices]
+    if z.version <= 6:
+        pos = [tuple(f32(c * 100.0) for c in p) for p in pos]
     return (tuple(min(p[k] for p in pos) for k in range(3)),
             tuple(max(p[k] for p in pos) for k in range(3)))
 
@@ -420,9 +430,33 @@ def test_bounding_box():
     # v5/v6 store positions and the box * 100; the check runs on the mesh's
     # own coordinates, so the float rounding of * 100 does not defeat it
     src = ZMS(V6_ZMS, report_func=lambda *a: None)
+    ok &= check(src.version == 6 and box(src) == tight_box(src),
+                "v6 fixture: file box is the min/max of its positions in file units (* 100)")
     _, zms, _ = export(import_zms(V6_ZMS), "box_v6.zms")
-    ok &= check(src.version == 6 and box(zms) == box(src),
-                "v6: the file's bounding box is written back")
+    ok &= check(box(zms) == box(src), "v6: the file's bounding box is written back")
+
+    # A recomputed v5/v6 box is in file units like the positions it bounds
+    # (it used to be written in mesh units, 100x too small)
+    def moved_max_x_vertex(obj):
+        max(obj.data.vertices, key=lambda v: v.co.x).co.x += 0.25
+
+    (lo, hi) = box(src)
+    for label, edit, kwargs, want in (
+            ("moved vertex", moved_max_x_vertex, {},
+             (lo, (hi[0] + 25.0, hi[1], hi[2]))),
+            ("world export of a moved object", moved_object, {"apply_world_transform": True},
+             ((lo[0] + 300.0, lo[1] - 200.0, lo[2] + 100.0),
+              (hi[0] + 300.0, hi[1] - 200.0, hi[2] + 100.0))),
+            ("mirrored export", lambda obj: None,
+             {"apply_world_transform": True, "convert_coordinates": True},
+             ((lo[0], -hi[1], lo[2]), (hi[0], -lo[1], hi[2]))),
+            ("object without a recorded box (older import)", legacy, {}, (lo, hi))):
+        obj = import_zms(V6_ZMS)
+        edit(obj)
+        _, zms, _ = export(obj, "box_v6_edited.zms", **kwargs)
+        err = max(abs(a - b) for got, exp in zip(box(zms), want) for a, b in zip(got, exp))
+        ok &= check(box(zms) == tight_box(zms) and err < 1e-3,
+                    f"v6 {label}: box recomputed in file units (max error {err:.2g})")
     return ok
 
 

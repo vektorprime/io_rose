@@ -164,11 +164,12 @@ XYZW (x first).
   and 26 contain degenerate triangles (strip joins such as `(0, 1, 1)`).
   Both lists are only valid for the exact triangle list they came with -
   see blender-importer.md, "ZMS round trip". The header bounding box is not
-  the min/max of the positions in 1979 files (v5/v6 store it `* 100`, like
-  the positions). Skinned files (699): per vertex 4 f32 weights, then 4
-  slots into the bone table (u32 v5/6, u16 v7+); 310 store the weights
-  unsorted and 44 point zero-weight slots at slots other than 0. No client
-  table lists a bone twice.
+  the min/max of the positions in 1971 files, all v7+ (v5/v6 store it
+  `* 100`, like the positions; `rose/zms.py` divides only the positions, and
+  in file units all 8 v6 boxes are tight). Skinned files (699): per vertex 4
+  f32 weights, then 4 slots into the bone table (u32 v5/6, u16 v7+); 310
+  store the weights unsorted and 44 point zero-weight slots at slots other
+  than 0. No client table lists a bone twice.
 - **EFT/PTL** (effects/particles): parsers `rose/eft.py`, `rose/ptl.py`;
   operators `import_eft.py` / `export_eft.py` (slots, meshes, particle
   preview, TRAJ baking). Byte-exact round-trip covered by

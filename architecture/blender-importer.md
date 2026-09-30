@@ -287,17 +287,25 @@ exports its own face-derived normals, which differ per piece at the seam
 
 ### Bounding box
 
-1979 of 2882 client files store a header box that is not the min/max of
-their positions (the authoring tool's box); v5/v6 store it `* 100` like the
-positions. The exporter writes the imported box back while the topology is
-unchanged and the positions it exports, in mesh units, still have
-`zms_import_position_crc` (`_restore_bounding_box`). Mesh units, not file
-units: `(co * 100) / 100` is exact, so a v6 file keeps its box although
-`* 100` rounds some positions. A moved vertex, a world export of a moved
-object, the mirror of `convert_coordinates=True`, a topology edit or an
-object without the props all get the box recomputed from the exported
-positions as before - which for v5/v6 is still written in mesh units, 100x
-too small (pre-existing, unchanged).
+1971 of 2882 client files, all v7+, store a header box that is not the
+min/max of their positions (the authoring tool's box). v5/v6 store the box
+`* 100` like the positions (file units, e.g. `AVATAR/CAP/CAP_02600.ZMS`:
+min `(-41.97, -58.62, -39.92)`), and all 8 v6 files have a tight box in
+those units. `rose/zms.py` divides only the positions by 100 and keeps the
+box verbatim: the importers stash it as `zms_import_bbox_min/max`, and
+rose-offline's `ZmsFile::read_bounds` reads a v5/v6 box as centimeters.
+
+The exporter writes the imported box back while the topology is unchanged
+and the positions it exports, in mesh units, still have
+`zms_import_position_crc` (`_restore_bounding_box`). The CRC uses mesh
+units, not file units: `(co * 100) / 100` is exact, so a v6 file keeps its
+box although `* 100` rounds some positions. A moved vertex, a world export
+of a moved object, the mirror of `convert_coordinates=True`, a topology
+edit or an object without the props all get the box recomputed from the
+exported positions, in file units like the positions it bounds (v5/v6:
+from the `* 100` values). Float32 rounding is monotonic, so the written box
+is exactly the min/max of the written positions. Before this fix the v5/v6
+recomputed box was written in mesh units, 100x too small.
 
 ### Skin weights
 

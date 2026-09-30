@@ -22,7 +22,7 @@ guard against regressions.
 | test_blender_materials.py | Blender headless | UV maps, per-pair materials, layer2 rotation, DDS alpha, Non-Color + Gamma |
 | test_eft_roundtrip.py | pure python | every EFT/PTL file saves back byte-identically; effective-path rules |
 | test_blender_eft.py | Blender headless | `.eft` import (slots, meshes, particle preview, TRAJ baking) + export round-trip |
-| test_blender_zms_export.py | Blender headless | ZMS export: stale strips/material counts dropped after topology edits (subdivide, delete, flip, mirror, older imports), unedited round trip byte-identical through both importers (incl. normals Blender cannot store, non-tight bounding boxes, unsorted/unnormalized skin weights, zero-weight slots, a duplicated bone table) and on a client sample (skinned included), box recomputed / weights sorted+renormalized only for moved vertices, edited weights and topology edits, exported normals = custom corner normals (UV-seam hard edge, split pieces, world transform), degenerate-triangle import crash |
+| test_blender_zms_export.py | Blender headless | ZMS export: stale strips/material counts dropped after topology edits (subdivide, delete, flip, mirror, older imports), unedited round trip byte-identical through both importers (incl. normals Blender cannot store, non-tight bounding boxes, unsorted/unnormalized skin weights, zero-weight slots, a duplicated bone table) and on a client sample (skinned included), box recomputed (v5/v6 in file units, x100) / weights sorted+renormalized only for moved vertices, edited weights and topology edits, exported normals = custom corner normals (UV-seam hard edge, split pieces, world transform), degenerate-triangle import crash |
 
 ## Test data
 
