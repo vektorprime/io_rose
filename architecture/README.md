@@ -10,7 +10,7 @@ addon relates to the Rust reference implementation
 |----------|-------|
 | [rose-file-formats.md](rose-file-formats.md) | Binary layouts of ZON / HIM / TIL / IFO (ground truth: `rose-file-readers` crate). |
 | [rose-offline-client-zone-loading.md](rose-offline-client-zone-loading.md) | How the Bevy client loads zones: 64x64 block grid, sparse tiles, world-space mapping, coordinate transforms. |
-| [blender-importer.md](blender-importer.md) | How `import_map.py` imports `.zon` maps: pipeline, mesh generation (main quads only, no stitching), materials, pitfalls; ZMS import/export round trip (strips, material counts, normals). |
+| [blender-importer.md](blender-importer.md) | How `import_map.py` imports `.zon` maps: pipeline, mesh generation (main quads only, no stitching), materials, pitfalls; ZMS import/export round trip (strips, material counts, normals, bounding box, skin weights). |
 | [zone-exporter.md](zone-exporter.md) | The zone save feature: byte-exact writers, round-trip metadata, diff-based IFO/HIM export, backups, new-mesh flow. |
 
 ## Key takeaways from the 2026-07-31 session (sparse-tile crash)

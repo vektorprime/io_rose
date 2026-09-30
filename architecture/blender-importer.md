@@ -193,11 +193,12 @@ MALE.ZMD, compute the global bind pose of dummy `p_03` using the client's
 own conversions (`pos (x, z, -y)/100`, `Quat::from_xyzw(x, z, -y, w)`,
 hierarchy multiply), then compose with the loader swap above.
 
-## ZMS round trip: strips, material counts, normals (2026-09-30)
+## ZMS round trip: strips, material counts, normals, box, skin (2026-09-30)
 
 Found during a mesh-replacement task: re-exporting an imported ZMS after a
 topology edit wrote the imported strips verbatim, and normals were not the
-file's. Guarded by `tests/test_blender_zms_export.py`.
+file's. The bounding box and skin weights followed. Guarded by
+`tests/test_blender_zms_export.py`.
 
 ### What the importers store
 
@@ -208,9 +209,15 @@ file's. Guarded by `tests/test_blender_zms_export.py`.
   `zms_materials` (matid_numfaces), plus the imported topology
   `zms_import_vertex_count`, `zms_import_triangle_count` and
   `zms_import_index_crc` (`rose/zms.py` `index_checksum`, CRC32 of the
-  triangle index list).
+  triangle index list), and the file's box `zms_import_bbox_min` /
+  `zms_import_bbox_max` with `zms_import_position_crc` (`position_checksum`,
+  CRC32 of the positions packed as float32, in mesh units).
 - Mesh attribute `zms_normal` (POINT, FLOAT_VECTOR): the exact file
   normals, including non-unit ones (351 client files).
+- Skinned files only, mesh attributes `zms_bone_weight` and `zms_bone_slot`
+  (POINT, QUATERNION used as a plain float4): each vertex's 4 file blend
+  weights and 4 bone table slots, in file order (`Vertex.bone_slots`, the
+  raw slots the reader resolves through the table into `bone_indices`).
 - Faces are smooth shaded **before** `normals_split_custom_set` (custom
   normals are stored relative to the shading-dependent corner spaces, so
   changing shading afterwards changes them). `import_eft.py` does the same.
@@ -278,14 +285,59 @@ them, or Data Transfer from the whole mesh). A piece without custom normals
 exports its own face-derived normals, which differ per piece at the seam
 (22.6 deg on the test sheet); the exporter cannot recover those.
 
+### Bounding box
+
+1979 of 2882 client files store a header box that is not the min/max of
+their positions (the authoring tool's box); v5/v6 store it `* 100` like the
+positions. The exporter writes the imported box back while the topology is
+unchanged and the positions it exports, in mesh units, still have
+`zms_import_position_crc` (`_restore_bounding_box`). Mesh units, not file
+units: `(co * 100) / 100` is exact, so a v6 file keeps its box although
+`* 100` rounds some positions. A moved vertex, a world export of a moved
+object, the mirror of `convert_coordinates=True`, a topology edit or an
+object without the props all get the box recomputed from the exported
+positions as before - which for v5/v6 is still written in mesh units, 100x
+too small (pre-existing, unchanged).
+
+### Skin weights
+
+The fallback (edited weights, no stash, topology edits) is unchanged: each
+vertex's vertex groups sorted by weight, the top 4 divided by their sum,
+missing slots padded with bone id 0, and group `g` mapped to `zms_bones[g]`.
+Client files do not look like that: of 699 skinned files 310 store
+unsorted weights, 428 weights whose float bits `w / total` changes, 44
+zero-weight slots other than 0; and bone id 0 is not slot 0 when the table
+lists it later. 514 came back with other weights or slots on an unedited
+round trip (681 differed at all, most also in the box).
+
+So while the topology is unchanged, every vertex whose vertex-group weights
+are still exactly what importing the stash produced gets the stashed
+weights and slots (`_unchanged_file_skin`, `_restore_file_skin`). "What
+importing produced": both importers make one group per table entry in table
+order and add each slot with weight > 0 to its bone's group with REPLACE,
+i.e. group = first table slot holding that bone id, the same group the
+fallback maps back to that bone. The comparison is exact (float32 weights
+and group indices), so any weight paint, normalize, added or removed group
+on a vertex sends that vertex through the fallback; the others keep the
+file bytes. Since the expected groups use the exporter's own group -> bone
+mapping, a restored vertex always has the influences the fallback would
+write. The writer keeps a vertex's raw slots while they still resolve to
+its bone ids (`_bone_slots`); only a table that lists a bone twice (no
+client file does) needs that over `bones.index(bone_id)`.
+
+`import_zms_zmd.py` names groups after ZMD joints and creates none without
+a skeleton in the folder (365 skinned client files, e.g. `AVATAR/ARMS`):
+those export without bone data at all (pre-existing, unchanged).
+
 ### Byte-exact round trip
 
-An unedited import (either importer) re-exports byte-identically when the
-file fits the exporter's own model: 807 of 2882 client files. The rest
-differ for pre-existing reasons outside this fix: the bounding box is
-recomputed from the vertices (1979 files store a non-tight box), bone
-weights are renormalized/sorted (677 of 699 skinned files), normals are
-always written (30 files have none), vertices are renumbered in first-use
-order (10 files), v5/v6 positions go through `* 100` (float rounding), and
-degenerate triangles are skipped (26 files). No file differs in normals,
-strips, material counts or indices.
+An unedited import re-exports byte-identically when the file fits the
+exporter's own model: 2809 of 2882 client files through `import_zms`
+(807 before the box and skin stash), and the same files through
+`import_zms_zmd` except the 365 skinned files without a ZMD alongside
+(2444). The rest differ for pre-existing reasons: normals are always
+written (30 files have none), degenerate triangles are skipped (26 files)
+and vertices are renumbered in first-use order (10 files), and v5/v6
+positions go through `* 100` (7 of the 8 v6 files differ in positions; box
+and everything else round-trip). No file differs in normals, box, skin
+weights, strips, material counts or indices.

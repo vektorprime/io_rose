@@ -17,7 +17,9 @@ import mathutils as bmath
 from bpy.props import StringProperty, BoolProperty
 from bpy_extras.io_utils import ImportHelper
 
-from .rose.zms import ZMS, FILE_NORMAL_ATTRIBUTE, index_checksum, valid_triangles
+from .rose.zms import (ZMS, FILE_BONE_SLOT_ATTRIBUTE, FILE_BONE_WEIGHT_ATTRIBUTE,
+                       FILE_NORMAL_ATTRIBUTE, index_checksum, position_checksum,
+                       valid_triangles)
 from .rose.zmd import ZMD
 
 
@@ -414,7 +416,15 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
             # Exact file normals for a bit-exact re-export (see exporter)
             attr = mesh.attributes.new(FILE_NORMAL_ATTRIBUTE, 'FLOAT_VECTOR', 'POINT')
             attr.data.foreach_set("vector", [c for n in normals for c in n])
-        
+
+        # Exact file blend weights and bone slots (see exporter)
+        if zms.bones_enabled():
+            for name, values in (
+                    (FILE_BONE_WEIGHT_ATTRIBUTE, [w for v in zms.vertices for w in v.bone_weights]),
+                    (FILE_BONE_SLOT_ATTRIBUTE, [float(s) for v in zms.vertices for s in v.bone_slots])):
+                attr = mesh.attributes.new(name, 'QUATERNION', 'POINT')
+                attr.data.foreach_set("value", values)
+
         # UV layers
         if zms.uv1_enabled():
             mesh.uv_layers.new(name="uv1")
@@ -555,6 +565,12 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
         obj["zms_import_vertex_count"] = len(zms.vertices)
         obj["zms_import_triangle_count"] = len(zms.indices)
         obj["zms_import_index_crc"] = index_checksum(zms.indices)
+        # The file's bounding box (often not the min/max of its positions),
+        # restored while the exported positions still have this checksum
+        obj["zms_import_bbox_min"] = zms.bounding_box_min.as_tuple()
+        obj["zms_import_bbox_max"] = zms.bounding_box_max.as_tuple()
+        obj["zms_import_position_crc"] = position_checksum(
+            v.position.as_tuple() for v in zms.vertices)
 
         # Link to scene
         context.collection.objects.link(obj)

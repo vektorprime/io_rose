@@ -8,6 +8,14 @@ from .utils import *
 # so the exporter needs these to write an unedited import back bit-for-bit.
 FILE_NORMAL_ATTRIBUTE = "zms_normal"
 
+# Mesh attributes (POINT, QUATERNION used as a plain float4) where the
+# importers stash each vertex's 4 file blend weights and the 4 bone slots
+# (bone table indices, exact as floats) in file order. Vertex groups keep
+# only the nonzero weights, so the exporter needs these to write an unedited
+# skin back bit-for-bit (slot order, zero-weight slots, weight bits).
+FILE_BONE_WEIGHT_ATTRIBUTE = "zms_bone_weight"
+FILE_BONE_SLOT_ATTRIBUTE = "zms_bone_slot"
+
 
 def index_checksum(indices):
     """CRC32 (8 hex digits) of a triangle index list (Vector3 per face).
@@ -21,6 +29,19 @@ def index_checksum(indices):
     for idx in indices:
         flat.extend((int(idx.x), int(idx.y), int(idx.z)))
     return f"{zlib.crc32(struct.pack(f'<{len(flat)}I', *flat)):08x}"
+
+
+def position_checksum(positions):
+    """CRC32 (8 hex digits) of (x, y, z) positions packed as float32.
+
+    The importers record it for the file's vertices (in mesh units, i.e.
+    after the v5/v6 / 100) as obj["zms_import_position_crc"], next to the
+    file's bounding box; the exporter writes that box back only while the
+    positions it exports still have this checksum. Many client files store
+    a box that is not the min/max of their positions.
+    """
+    flat = [c for p in positions for c in p]
+    return f"{zlib.crc32(struct.pack(f'<{len(flat)}f', *flat)):08x}"
 
 
 def valid_triangles(indices):
@@ -92,6 +113,10 @@ class Vertex:
         self.color = Color4()
         self.bone_weights = [0.0, 0.0, 0.0, 0.0]  # vec4 (4x float)
         self.bone_indices = [0, 0, 0, 0]  # vec4 (4x float in C++, but stored as indices)
+        # File slots (bone table indices) behind bone_indices, when read
+        # from a file; the writer keeps them while they still resolve to
+        # bone_indices (see export_zms.py _bone_slots)
+        self.bone_slots = None
         self.tangent = Vector3()
         self.uv1 = Vector2()
         self.uv2 = Vector2()
@@ -239,6 +264,7 @@ class ZMS:
                     _resolve_bone_index(bone_table, idx)
                     for idx in bone_indices_raw
                 ]
+                self.vertices[i].bone_slots = list(bone_indices_raw)
 
         # Read tangents
         if self.tangents_enabled():
@@ -339,6 +365,7 @@ class ZMS:
                     _resolve_bone_index(self.bones, idx)
                     for idx in bone_indices_raw
                 ]
+                self.vertices[i].bone_slots = list(bone_indices_raw)
 
         if self.tangents_enabled():
             for i in range(vert_count):

@@ -1,13 +1,20 @@
-"""Headless Blender test for ZMS export: stale strips/materials and normals.
+"""Headless Blender test for ZMS export: stale strips/materials, normals,
+bounding boxes and skin weights.
 
 Run with the Blender executable (requires bpy):
   blender --background --factory-startup --python tests/test_blender_zms_export.py
 
-- Imports are smooth shaded, stash the exact file normals and the imported
-  topology; degenerate triangles are skipped instead of crashing Blender.
+- Imports are smooth shaded, stash the exact file normals, blend weights
+  and bone slots, and record the imported topology, bounding box and
+  position CRC; degenerate triangles are skipped instead of crashing Blender.
 - Unedited import -> export is byte-identical through both importers,
-  including normals Blender cannot represent, and for a deterministic
-  sample of client files the exporter can reproduce.
+  including normals Blender cannot represent, non-tight bounding boxes,
+  unsorted / unnormalized weights and zero-weight slots, and for a
+  deterministic sample of client files the exporter can reproduce.
+- The recorded box and skin stash only apply while they still describe the
+  mesh: a moved vertex, world transform or topology edit recomputes the
+  box, and edited vertex weights (or any topology edit) export exactly as
+  without the stash (sorted, renormalized, padded with bone 0).
 - Edited topology (subdivide, delete, flipped face) and objects without
   recorded import counts export empty strips / material face counts with
   an INFO report instead of the stale imported lists.
@@ -43,8 +50,10 @@ sys.modules["io_rose"] = io_rose
 _spec.loader.exec_module(io_rose)
 io_rose.register()
 
-from io_rose.export_zms import export_zms_mesh_object  # noqa: E402
-from io_rose.rose.zms import FILE_NORMAL_ATTRIBUTE, ZMS, index_checksum  # noqa: E402
+from io_rose.export_zms import ExportZMS, export_zms_mesh_object  # noqa: E402
+from io_rose.rose.zms import (FILE_BONE_SLOT_ATTRIBUTE, FILE_BONE_WEIGHT_ATTRIBUTE,  # noqa: E402
+                              FILE_NORMAL_ATTRIBUTE, ZMS, index_checksum,
+                              position_checksum)
 
 ROOT = _paths.client_3ddata_root()
 # v7, skinned (1 bone), WARRIOR_BONE.ZMD alongside, 90 strip indices, 6 of
@@ -58,6 +67,15 @@ MATERIALS_ZMS = os.path.join(ROOT, "AVATAR", "ARMS", "ARM1_03300.ZMS")
 DEGENERATE_ZMS = os.path.join(ROOT, "ITEM", "BACK", "BACK02.ZMS")
 # degenerate triangles + material face counts [48, 84, 4, 4, 4] (144 tris)
 DEGENERATE_MATERIALS_ZMS = os.path.join(ROOT, "PAT", "CART", "ABILITY", "CART01_ABILITY052.ZMS")
+# v8 skinned, 6 bones, non-tight box, unsorted weights and weights whose
+# bits renormalizing changes; ZMD alongside
+SKINNED_ZMS = os.path.join(ROOT, "NPC", "ANIMAL", "WOLF2", "BODY02_1.ZMS")
+# v7 skinned, zero-weight slots pointing at other bones than the pad;
+# ZMD alongside
+ZERO_SLOT_ZMS = os.path.join(ROOT, "NPC", "ANIMAL", "STAGBEETLE", "HEAD01_010.ZMS")
+# v6: positions and bounding box stored * 100
+V6_ZMS = os.path.join(ROOT, "AVATAR", "CAP", "CAP_02600.ZMS")
+BOX_PROPS = ("zms_import_bbox_min", "zms_import_bbox_max", "zms_import_position_crc")
 SAMPLE_STEP = 15
 TMP_DIR = os.path.join(os.environ.get("TEMP", "/tmp"), "io_rose_zms_export_test")
 
@@ -105,6 +123,48 @@ def export(obj, name, **kwargs):
 def same_bytes(a, b):
     with open(a, "rb") as fa, open(b, "rb") as fb:
         return fa.read() == fb.read()
+
+
+def box(z):
+    return z.bounding_box_min.as_tuple(), z.bounding_box_max.as_tuple()
+
+
+def tight_box(z):
+    """Min/max of the positions (v7+; v5/v6 positions are read / 100)."""
+    pos = [v.position.as_tuple() for v in z.vertices]
+    return (tuple(min(p[k] for p in pos) for k in range(3)),
+            tuple(max(p[k] for p in pos) for k in range(3)))
+
+
+def skin(v):
+    """A parsed vertex's blend weights and raw file slots, bit-for-bit."""
+    return tuple(v.bone_weights), tuple(v.bone_slots or ())
+
+
+def skin_stash(mesh):
+    """The importers' (weights, slots) stash as 4-tuples per vertex."""
+    stash = []
+    for name in (FILE_BONE_WEIGHT_ATTRIBUTE, FILE_BONE_SLOT_ATTRIBUTE):
+        attr = mesh.attributes.get(name)
+        if attr is None:
+            return None
+        flat = [0.0] * (len(mesh.vertices) * 4)
+        attr.data.foreach_get("value", flat)
+        stash.append([tuple(flat[i:i + 4]) for i in range(0, len(flat), 4)])
+    return stash
+
+
+def without_stash(obj):
+    """Drop the recorded box and skin stash: the exporter then behaves as it
+    did before they existed (recomputed box; weights sorted by weight,
+    renormalized and padded with bone 0)."""
+    for key in BOX_PROPS:
+        if key in obj:
+            del obj[key]
+    for name in (FILE_BONE_WEIGHT_ATTRIBUTE, FILE_BONE_SLOT_ATTRIBUTE):
+        attr = obj.data.attributes.get(name)
+        if attr is not None:
+            obj.data.attributes.remove(attr)
 
 
 def vec(v):
@@ -161,12 +221,12 @@ def max_normal_error(zms, expected, mirror=False):
 
 def exporter_can_reproduce(z):
     """Files an unedited round trip can write back bit-for-bit, given the
-    exporter's own limits (not what this test guards): it recomputes the
-    bounding box, renormalizes bone weights, always writes normals, drops
-    tangents, renumbers vertices in first-use order and rescales v5/v6
-    positions by 100."""
+    exporter's own limits (not what this test guards): it always writes
+    normals, drops tangents, renumbers vertices in first-use order and
+    rescales v5/v6 positions by 100. Skinned files and non-tight bounding
+    boxes are included (the importers stash them)."""
     if (z.version < 7 or not z.normals_enabled() or z.tangents_enabled()
-            or z.bones_enabled() or not z.vertices):
+            or not z.vertices):
         return False
     order, seen = [], set()
     for idx in z.indices:
@@ -177,13 +237,7 @@ def exporter_can_reproduce(z):
             if k not in seen:
                 seen.add(k)
                 order.append(k)
-    if order != list(range(len(z.vertices))):
-        return False
-    pos = [(v.position.x, v.position.y, v.position.z) for v in z.vertices]
-    lo = tuple(min(p[k] for p in pos) for k in range(3))
-    hi = tuple(max(p[k] for p in pos) for k in range(3))
-    return (lo == (z.bounding_box_min.x, z.bounding_box_min.y, z.bounding_box_min.z) and
-            hi == (z.bounding_box_max.x, z.bounding_box_max.y, z.bounding_box_max.z))
+    return order == list(range(len(z.vertices)))
 
 
 def test_import_state():
@@ -217,6 +271,18 @@ def test_import_state():
     ok &= check(obj.parent is not None and obj.parent.type == 'ARMATURE',
                 "import with skeleton: parented to the ZMD armature")
 
+    src = ZMS(SKINNED_ZMS, report_func=lambda *a: None)
+    for label, importer in (("import_zms", import_zms), ("import_zms_zmd", import_zms_zmd)):
+        obj = importer(SKINNED_ZMS)
+        ok &= check((tuple(obj["zms_import_bbox_min"]), tuple(obj["zms_import_bbox_max"])) == box(src)
+                    and obj["zms_import_position_crc"] == position_checksum(
+                        v.position.as_tuple() for v in src.vertices),
+                    f"{label}: file bounding box and position CRC recorded")
+        ok &= check(skin_stash(obj.data) == [[tuple(v.bone_weights) for v in src.vertices],
+                                             [tuple(map(float, v.bone_slots)) for v in src.vertices]],
+                    f"{label}: file blend weights and bone slots stashed bit-for-bit")
+    ok &= check(skin_stash(import_zms(NONUNIT_ZMS).data) is None, "static mesh: no skin stash")
+
     # Would crash Blender (EXCEPTION_ACCESS_VIOLATION) before the fix
     src = ZMS(DEGENERATE_ZMS, report_func=lambda *a: None)
     obj = import_zms(DEGENERATE_ZMS)
@@ -231,23 +297,25 @@ def test_unedited_round_trip():
     ok = True
     for label, importer, path in (("import_zms", import_zms, STRIPS_ZMS),
                                   ("import_zms_zmd", import_zms_zmd, STRIPS_ZMS),
-                                  ("non-unit normals", import_zms, NONUNIT_ZMS)):
+                                  ("non-unit normals", import_zms, NONUNIT_ZMS),
+                                  ("skinned", import_zms, SKINNED_ZMS),
+                                  ("skinned import_zms_zmd", import_zms_zmd, SKINNED_ZMS),
+                                  ("zero-weight slots", import_zms, ZERO_SLOT_ZMS),
+                                  ("zero-weight slots import_zms_zmd", import_zms_zmd, ZERO_SLOT_ZMS),
+                                  ("material face counts", import_zms, MATERIALS_ZMS)):
         obj = importer(path)
+        if importer is import_zms_zmd:
+            ok &= check(obj.parent is not None and obj.parent.type == 'ARMATURE' and
+                        not any(g.name.startswith("zms_bone_") for g in obj.vertex_groups),
+                        f"{label}: skeleton found, weights in joint-named groups")
         out, zms, messages = export(obj, "roundtrip.zms")
         ok &= check(same_bytes(path, out),
                     f"unedited {label} round trip byte-identical ({os.path.basename(path)})")
         ok &= check(not any("empty" in m for m in messages), f"{label}: no strip-drop report")
-
-    # Not byte-exact (bounding box + bone weights are recomputed), but the
-    # material face counts and the file normals must come back untouched
     src = ZMS(MATERIALS_ZMS, report_func=lambda *a: None)
-    out, zms, _ = export(import_zms(MATERIALS_ZMS), "materials.zms")
-    ok &= check(zms.materials == src.materials == [84, 104],
-                "unedited export restores material face counts")
-    ok &= check([v.normal.as_tuple() for v in zms.vertices] == [v.normal.as_tuple() for v in src.vertices],
-                "unedited export writes the exact file normals")
+    ok &= check(src.materials == [84, 104], "fixture has material face counts")
 
-    tested, failed = 0, []
+    tested, failed, skinned, loose_box, with_zmd = 0, [], 0, 0, 0
     files = sorted(glob.glob(os.path.join(ROOT, "**", "*.ZMS"), recursive=True))
     for path in files[::SAMPLE_STEP]:
         try:
@@ -257,12 +325,22 @@ def test_unedited_round_trip():
         if not exporter_can_reproduce(src):
             continue
         tested += 1
-        out, _, _ = export(import_zms(path), "sample.zms")
-        if not same_bytes(path, out):
-            failed.append(os.path.relpath(path, ROOT))
-    ok &= check(tested >= 10 and not failed,
+        skinned += src.bones_enabled()
+        loose_box += box(src) != tight_box(src)
+        importers = [import_zms]
+        # import_zms_zmd makes no vertex groups without a skeleton alongside
+        if src.bones_enabled() and glob.glob(os.path.join(os.path.dirname(path), "*.ZMD")):
+            importers.append(import_zms_zmd)
+            with_zmd += 1
+        for importer in importers:
+            out, _, _ = export(importer(path), "sample.zms")
+            if not same_bytes(path, out):
+                failed.append(f"{os.path.relpath(path, ROOT)} ({importer.__name__})")
+    ok &= check(tested >= 150 and skinned >= 30 and loose_box >= 100 and with_zmd >= 15
+                and not failed,
                 f"sampled client files round-trip byte-identically "
-                f"({tested - len(failed)}/{tested}; failed: {failed[:5]})")
+                f"({tested - len(failed)}/{tested}; {skinned} skinned, {with_zmd} also "
+                f"through import_zms_zmd, {loose_box} non-tight boxes; failed: {failed[:5]})")
     return ok
 
 
@@ -305,6 +383,123 @@ def test_edited_topology():
     _, zms, messages = export(import_zms(DEGENERATE_MATERIALS_ZMS), "degenerate.zms")
     ok &= check(src.materials and zms.materials == [] and any("empty" in m for m in messages),
                 "degenerate triangles skipped on import: stale material counts dropped")
+    return ok
+
+
+def test_bounding_box():
+    ok = True
+    src = ZMS(SKINNED_ZMS, report_func=lambda *a: None)
+    ok &= check(box(src) != tight_box(src), "fixture: file box is not the min/max of its positions")
+    _, zms, _ = export(import_zms(SKINNED_ZMS), "box.zms")
+    ok &= check(box(zms) == box(src), "unedited: the file's bounding box is written back")
+
+    def moved_vertex(obj):
+        obj.data.vertices[0].co.x += 0.25
+
+    def moved_object(obj):
+        obj.location = (3.0, -2.0, 1.0)
+        bpy.context.view_layer.update()
+
+    def legacy(obj):
+        for key in BOX_PROPS:
+            del obj[key]
+
+    for label, edit, kwargs in (
+            ("moved vertex", moved_vertex, {}),
+            ("world export of a moved object", moved_object, {"apply_world_transform": True}),
+            ("subdivided edge", lambda obj: edit_bmesh(obj, subdivide_first_edge), {}),
+            ("mirrored export", lambda obj: None,
+             {"apply_world_transform": True, "convert_coordinates": True}),
+            ("object without a recorded box (older import)", legacy, {})):
+        obj = import_zms(SKINNED_ZMS)
+        edit(obj)
+        _, zms, _ = export(obj, "box_edited.zms", **kwargs)
+        ok &= check(box(zms) == tight_box(zms) != box(src),
+                    f"{label}: box recomputed from the exported positions")
+
+    # v5/v6 store positions and the box * 100; the check runs on the mesh's
+    # own coordinates, so the float rounding of * 100 does not defeat it
+    src = ZMS(V6_ZMS, report_func=lambda *a: None)
+    _, zms, _ = export(import_zms(V6_ZMS), "box_v6.zms")
+    ok &= check(src.version == 6 and box(zms) == box(src),
+                "v6: the file's bounding box is written back")
+    return ok
+
+
+def test_skin_weights():
+    ok = True
+    # Fixtures: the pre-stash exporter rewrites these vertices
+    for path, what in ((SKINNED_ZMS, "weight order / renormalized bits"),
+                       (ZERO_SLOT_ZMS, "zero-weight slots")):
+        src = ZMS(path, report_func=lambda *a: None)
+        obj = import_zms(path)
+        without_stash(obj)
+        _, zms, _ = export(obj, "skin_fallback.zms")
+        rewritten = [i for i, v in enumerate(src.vertices) if skin(zms.vertices[i]) != skin(v)]
+        zero_slots = [i for i in rewritten
+                      if [w for w in src.vertices[i].bone_weights if w > 0] ==
+                      [w for w in zms.vertices[i].bone_weights if w > 0]]
+        ok &= check(rewritten and (path != ZERO_SLOT_ZMS or zero_slots),
+                    f"fixture: without the stash {len(rewritten)} of {len(src.vertices)} vertices "
+                    f"of {os.path.basename(path)} change ({what})")
+
+    # Edited weights on some vertices: those export exactly as without the
+    # stash, the untouched ones keep the file's slots and weight bits
+    src = ZMS(SKINNED_ZMS, report_func=lambda *a: None)
+    edited = {0, 5, 9}
+    for label, importer in (("import_zms", import_zms), ("import_zms_zmd", import_zms_zmd)):
+        obj = importer(SKINNED_ZMS)
+        for vi in edited:
+            g = obj.data.vertices[vi].groups[0]
+            obj.vertex_groups[g.group].add([vi], 0.25 if g.weight != 0.25 else 0.5, 'REPLACE')
+        _, zms, _ = export(obj, "skin_edited.zms")
+        without_stash(obj)
+        _, fallback, _ = export(obj, "skin_edited_fallback.zms")
+        ok &= check(all(skin(zms.vertices[i]) == skin(fallback.vertices[i]) for i in edited),
+                    f"{label}: edited vertices export sorted, renormalized weights as before")
+        ok &= check(all(skin(zms.vertices[i]) == skin(v)
+                        for i, v in enumerate(src.vertices) if i not in edited),
+                    f"{label}: untouched vertices keep the file's slots and weight bits")
+        ok &= check(box(zms) == box(src), f"{label}: weight edits keep the file's box")
+
+    # Topology edits (and the mirrored zone export) ignore the stash
+    for label, edit, kwargs in (
+            ("subdivided edge", lambda obj: edit_bmesh(obj, subdivide_first_edge), {}),
+            ("deleted face", lambda obj: edit_bmesh(obj, lambda bm: bmesh.ops.delete(
+                bm, geom=[bm.faces[0]], context='FACES_ONLY')), {}),
+            ("mirrored export", lambda obj: None,
+             {"apply_world_transform": True, "convert_coordinates": True})):
+        obj = import_zms(SKINNED_ZMS)
+        edit(obj)
+        out, _, _ = export(obj, "skin_topology.zms", **kwargs)
+        without_stash(obj)
+        fallback, _, _ = export(obj, "skin_topology_fallback.zms", **kwargs)
+        ok &= check(same_bytes(out, fallback),
+                    f"{label}: output identical to the exporter without the stash")
+    return ok
+
+
+def test_duplicate_bone_table():
+    """No client file lists a bone twice, but the slots must survive it:
+    bone_table.index() alone would move them to the bone's first slot."""
+    ok = True
+    z = ZMS(SKINNED_ZMS, report_func=lambda *a: None)
+    dup = len(z.bones)
+    z.bones.append(z.bones[0])
+    moved = 0
+    for v in z.vertices:
+        for k in range(4):
+            if moved < 5 and v.bone_slots[k] == 0 and v.bone_weights[k] > 0:
+                v.bone_slots[k] = dup
+                moved += 1
+    path = os.path.join(TMP_DIR, "dup_table.zms")
+    with open(path, "wb") as f:
+        ExportZMS.write_zms(f, z)
+    written = ZMS(path, report_func=lambda *a: None)
+    ok &= check(moved == 5 and sum(s == dup for v in written.vertices for s in v.bone_slots) == 5,
+                "writer keeps the file slots of a bone listed twice")
+    out, _, _ = export(import_zms(path), "dup_table_roundtrip.zms")
+    ok &= check(same_bytes(path, out), "duplicate bone table: unedited round trip byte-identical")
     return ok
 
 
@@ -462,13 +657,15 @@ def test_normals():
 
 
 def main():
-    for path in (STRIPS_ZMS, NONUNIT_ZMS, MATERIALS_ZMS, DEGENERATE_ZMS, DEGENERATE_MATERIALS_ZMS):
+    for path in (STRIPS_ZMS, NONUNIT_ZMS, MATERIALS_ZMS, DEGENERATE_ZMS, DEGENERATE_MATERIALS_ZMS,
+                 SKINNED_ZMS, ZERO_SLOT_ZMS, V6_ZMS):
         if not os.path.isfile(path):
             print(f"test file not found: {path}")
             return 1
     os.makedirs(TMP_DIR, exist_ok=True)
     ok = True
     for test in (test_import_state, test_unedited_round_trip, test_edited_topology,
+                 test_bounding_box, test_skin_weights, test_duplicate_bone_table,
                  test_normals):
         # Blender's --python exits 0 on an uncaught exception
         try:

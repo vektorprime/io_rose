@@ -121,6 +121,109 @@ def _restore_file_normals(zms, source_vertices, file_normals, unchanged,
             v.normal = Vector3(fx, -fy if convert_coordinates else fy, fz)
 
 
+def _mesh_unit_positions(zms):
+    """Exported positions in mesh units: v5/v6 store them * 100, and
+    (co * 100) / 100 gives back the exact float32 coordinate."""
+    if zms.version <= 6:
+        return [(v.position.x / 100.0, v.position.y / 100.0, v.position.z / 100.0)
+                for v in zms.vertices]
+    return [(v.position.x, v.position.y, v.position.z) for v in zms.vertices]
+
+
+def _restore_bounding_box(obj, zms):
+    """Write the imported bounding box back while the exported positions
+    are exactly the imported ones (same order and float32 bits).
+
+    1979 of 2882 client files store a box that is not the min/max of their
+    positions, so the recomputed box breaks an unedited round trip. A moved
+    vertex, or a world transform / mirror that moves them all, keeps the
+    recomputed box.
+    """
+    lo, hi = obj.get("zms_import_bbox_min"), obj.get("zms_import_bbox_max")
+    crc = obj.get("zms_import_position_crc")
+    if None in (lo, hi, crc) or len(lo) != 3 or len(hi) != 3:
+        return
+    if crc != position_checksum(_mesh_unit_positions(zms)):
+        return
+    zms.bounding_box_min = Vector3(*lo)
+    zms.bounding_box_max = Vector3(*hi)
+
+
+def _file_skin(mesh):
+    """Stashed per-vertex file blend weights and bone slots (4-tuples in
+    file slot order), or None."""
+    attrs = (mesh.attributes.get(FILE_BONE_WEIGHT_ATTRIBUTE),
+             mesh.attributes.get(FILE_BONE_SLOT_ATTRIBUTE))
+    if any(a is None or a.domain != 'POINT' or a.data_type != 'QUATERNION'
+           for a in attrs):
+        return None
+    stash = []
+    for attr in attrs:
+        flat = [0.0] * (len(mesh.vertices) * 4)
+        attr.data.foreach_get("value", flat)
+        stash.append([tuple(flat[i:i + 4]) for i in range(0, len(flat), 4)])
+    weights, slots = stash
+    return weights, [tuple(int(s) if s.is_integer() else -1 for s in q) for q in slots]
+
+
+def _unchanged_file_skin(mesh, bones, file_weights, file_slots):
+    """Per mesh vertex: True while its vertex-group weights are still exactly
+    what importing the stashed file weights produced.
+
+    Both importers make one vertex group per bone table entry, in table
+    order, and add every slot with weight > 0 to its bone's group (the
+    first table slot holding that bone id; the exporter maps group g back
+    to bones[g]). Slot order, zero-weight slots and the unnormalized weight
+    bits are not in the groups, so only the stash can reproduce them.
+    """
+    group_of_slot = [bones.index(b) for b in bones]
+    unchanged = []
+    for vert, weights, slots in zip(mesh.vertices, file_weights, file_slots):
+        expected = {}
+        for w, s in zip(weights, slots):
+            if not 0 <= s < len(bones):
+                expected = None
+                break
+            if w > 0.0:
+                expected[group_of_slot[s]] = w  # importers add with REPLACE
+        unchanged.append(expected is not None and
+                         sorted((g.group, g.weight) for g in vert.groups) ==
+                         sorted(expected.items()))
+    return unchanged
+
+
+def _restore_file_skin(zms, source_vertices, file_weights, file_slots, unchanged):
+    """Write the stashed file weights and slots for every exported vertex
+    whose source vertex still has its imported vertex-group weights."""
+    for v, vert_idx in zip(zms.vertices, source_vertices):
+        if unchanged[vert_idx]:
+            v.bone_weights = list(file_weights[vert_idx])
+            v.bone_slots = list(file_slots[vert_idx])
+            v.bone_indices = [zms.bones[s] for s in v.bone_slots]
+
+
+def _bone_slots(v, bone_table):
+    """Bone table slot written for each of the vertex's 4 bone ids.
+
+    The file's own slots (v.bone_slots) are kept while they still resolve
+    to v.bone_indices, since bone_table.index() returns the first slot of a
+    bone listed twice. Otherwise each bone id's first slot, 0 if missing.
+    """
+    bone_ids = v.bone_indices[:4]
+    slots = v.bone_slots
+    if (slots is not None and len(slots) == len(bone_ids) and
+            all(0 <= s < len(bone_table) and bone_table[s] == b
+                for s, b in zip(slots, bone_ids))):
+        return list(slots)
+    result = []
+    for bone_id in bone_ids:
+        try:
+            result.append(bone_table.index(bone_id))
+        except ValueError:
+            result.append(0)
+    return result
+
+
 def _mesh_has_colors(mesh):
     """True if the mesh carries vertex colors (legacy or 4.x attributes)."""
     if len(mesh.vertex_colors) > 0:
@@ -298,8 +401,9 @@ def export_zms_mesh_object(obj, filepath, version=8, export_normals=True,
         return "ZMS creation failed"
 
     # Apply restored metadata. Strips, material face counts and the exact
-    # file normals belong to the imported triangle list: after a topology
-    # edit (decimate, subdivide, re-mesh) they would describe the old layout.
+    # file normals, bounding box and skin weights belong to the imported
+    # triangle list: after a topology edit (decimate, subdivide, re-mesh)
+    # they would describe the old layout.
     topology_change = _topology_change(obj, zms)
     if topology_change is None:
         if orig_materials is not None:
@@ -317,6 +421,13 @@ def export_zms_mesh_object(obj, filepath, version=8, export_normals=True,
         if unchanged is not None:
             _restore_file_normals(zms, source_vertices, file_normals,
                                   unchanged, convert_coordinates)
+        _restore_bounding_box(obj, zms)
+        # File slot order, zero-weight slots and unnormalized weights for
+        # vertices whose vertex-group weights are untouched
+        skin = _file_skin(mesh) if zms.bones_enabled() and zms.bones else None
+        if skin is not None:
+            _restore_file_skin(zms, source_vertices, *skin,
+                               _unchanged_file_skin(mesh, zms.bones, *skin))
     elif orig_materials or orig_strips:
         report('INFO', f"{obj.name}: {topology_change}; writing empty "
                        f"triangle strips and material face counts")
@@ -640,15 +751,9 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
 
         # Calculate bounding box (vec3 pmin, pmax)
         if len(zms.vertices) > 0:
-            # Get positions (accounting for scaling)
-            positions = []
-            for v in zms.vertices:
-                if version <= 6:
-                    # Already scaled, so divide back for bounding box calculation
-                    positions.append((v.position.x / 100.0, v.position.y / 100.0, v.position.z / 100.0))
-                else:
-                    positions.append((v.position.x, v.position.y, v.position.z))
-            
+            # Get positions (v5/v6 are already scaled, so divided back)
+            positions = _mesh_unit_positions(zms)
+
             min_x = min(p[0] for p in positions)
             min_y = min(p[1] for p in positions)
             min_z = min(p[2] for p in positions)
@@ -723,11 +828,7 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
                 for w in v.bone_weights[:4]:
                     f.write(struct.pack("<f", w))
                 # vec4 blend_index (stored as uint32 in file, indices into bone_table)
-                for bone_id in v.bone_indices[:4]:
-                    try:
-                        idx = bone_table.index(bone_id)
-                    except ValueError:
-                        idx = 0
+                for idx in _bone_slots(v, bone_table):
                     f.write(struct.pack("<I", idx))
         
         if zms.tangents_enabled():
@@ -810,11 +911,7 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
                 for w in v.bone_weights[:4]:
                     f.write(struct.pack("<f", w))
                 # vec4 blend_index (stored as uint16 in file, indices into bones list)
-                for bone_id in v.bone_indices[:4]:
-                    try:
-                        idx = zms.bones.index(bone_id)
-                    except ValueError:
-                        idx = 0
+                for idx in _bone_slots(v, zms.bones):
                     f.write(struct.pack("<H", idx))  # uint16
         
         if zms.tangents_enabled():
