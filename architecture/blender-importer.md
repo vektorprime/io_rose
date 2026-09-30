@@ -333,19 +333,25 @@ write. The writer keeps a vertex's raw slots while they still resolve to
 its bone ids (`_bone_slots`); only a table that lists a bone twice (no
 client file does) needs that over `bones.index(bone_id)`.
 
-`import_zms_zmd.py` names groups after ZMD joints and creates none without
-a skeleton in the folder (365 skinned client files, e.g. `AVATAR/ARMS`):
-those export without bone data at all (pre-existing, unchanged).
+`import_zms_zmd.py` names groups after ZMD joints when it finds a skeleton
+in the folder. Without one (373 skinned client files, e.g. `AVATAR/ARMS`,
+`AVATAR/BODY`, or a ZMD that fails to load) it makes the same
+`zms_bone_{i}` groups and weights as `import_zms`, through the shared
+`import_zms.py` `add_zms_bone_groups`, and both importers export those
+files to the same bytes. It used to create no groups there, so the
+exporter saw no weights and wrote them without BONE_WEIGHT/BONE_INDEX: the
+skin was lost.
 
 ### Byte-exact round trip
 
 An unedited import re-exports byte-identically when the file fits the
 exporter's own model: 2809 of 2882 client files through `import_zms`
-(807 before the box and skin stash), and the same files through
-`import_zms_zmd` except the 365 skinned files without a ZMD alongside
-(2444). The rest differ for pre-existing reasons: normals are always
-written (30 files have none), degenerate triangles are skipped (26 files)
-and vertices are renumbered in first-use order (10 files), and v5/v6
+(807 before the box and skin stash), and the same 2809 through
+`import_zms_zmd` (2444 while it dropped the skin of the 365 of them that
+are skinned with no ZMD alongside). The rest differ for pre-existing
+reasons: normals are always written (30 files have none), degenerate
+triangles are skipped (26 files) and vertices are renumbered in first-use
+order (10 files), and v5/v6
 positions go through `* 100` (7 of the 8 v6 files differ in positions; box
 and everything else round-trip). No file differs in normals, box, skin
 weights, strips, material counts or indices.

@@ -10,6 +10,46 @@ from bpy.props import StringProperty, BoolProperty
 from bpy_extras.io_utils import ImportHelper
 
 
+def add_zms_bone_groups(obj, zms):
+    """One vertex group zms_bone_{i} per bone table entry, with each file
+    slot of weight > 0 added to the group of its bone id.
+
+    Used by import_zms and by import_zms_zmd when no skeleton is found. The
+    exporter maps group g back to obj["zms_bones"][g], and its exact skin
+    restore (export_zms.py _unchanged_file_skin) expects exactly this
+    layout, so an unedited import re-exports the file's weights and slots.
+    """
+    # Create one Blender vertex group per ZMS bone entry (order matters)
+    # bone_indices in C++ is std::vector<uint16> - each entry is a bone ID
+    if len(zms.bones) > 0:
+        for i, bone_id in enumerate(zms.bones):
+            # name groups deterministically; exporter relies on obj["zms_bones"] to restore mapping
+            # The group index corresponds to the index in the bones array
+            obj.vertex_groups.new(name=f"zms_bone_{i}")
+
+        # Assign weights per vertex. mesh.from_pydata created vertices in same order as zms.vertices
+        for vi, v in enumerate(zms.vertices):
+            # bone_weights is vec4 (4x float)
+            # bone_indices now contain the actual bone IDs (uint16 values after mapping)
+            for gi in range(4):
+                try:
+                    weight = v.bone_weights[gi]
+                    bone_id = int(v.bone_indices[gi])
+                except (IndexError, ValueError):
+                    continue
+
+                if weight and weight > 0.0:
+                    # Find which group index corresponds to this bone_id
+                    # The bone_id should match zms.bones[group_index]
+                    try:
+                        group_index = zms.bones.index(bone_id)
+                        if 0 <= group_index < len(obj.vertex_groups):
+                            obj.vertex_groups[group_index].add([vi], weight, 'REPLACE')
+                    except ValueError:
+                        # bone_id not in bones list, skip
+                        pass
+
+
 class ImportZMS(bpy.types.Operator, ImportHelper):
     bl_idname = "rose.import_zms"
     bl_label = "ROSE Mesh (.zms)"
@@ -59,36 +99,8 @@ class ImportZMS(bpy.types.Operator, ImportHelper):
 
         obj = bpy.data.objects.new(filename, mesh)
 
-        # --- Create vertex groups and assign weights so exporter can detect bone data ---
-        # Create one Blender vertex group per ZMS bone entry (order matters)
-        # bone_indices in C++ is std::vector<uint16> - each entry is a bone ID
-        if len(zms.bones) > 0:
-            for i, bone_id in enumerate(zms.bones):
-                # name groups deterministically; exporter relies on obj["zms_bones"] to restore mapping
-                # The group index corresponds to the index in the bones array
-                obj.vertex_groups.new(name=f"zms_bone_{i}")
-
-            # Assign weights per vertex. mesh.from_pydata created vertices in same order as zms.vertices
-            for vi, v in enumerate(zms.vertices):
-                # bone_weights is vec4 (4x float)
-                # bone_indices now contain the actual bone IDs (uint16 values after mapping)
-                for gi in range(4):
-                    try:
-                        weight = v.bone_weights[gi]
-                        bone_id = int(v.bone_indices[gi])
-                    except (IndexError, ValueError):
-                        continue
-
-                    if weight and weight > 0.0:
-                        # Find which group index corresponds to this bone_id
-                        # The bone_id should match zms.bones[group_index]
-                        try:
-                            group_index = zms.bones.index(bone_id)
-                            if 0 <= group_index < len(obj.vertex_groups):
-                                obj.vertex_groups[group_index].add([vi], weight, 'REPLACE')
-                        except ValueError:
-                            # bone_id not in bones list, skip
-                            pass
+        # Vertex groups and weights so the exporter can detect bone data
+        add_zms_bone_groups(obj, zms)
 
         # Store ZMS metadata on the object for later export
         # These need to be stored so the exporter can recreate the exact file

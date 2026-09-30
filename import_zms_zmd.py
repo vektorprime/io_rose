@@ -21,6 +21,7 @@ from .rose.zms import (ZMS, FILE_BONE_SLOT_ATTRIBUTE, FILE_BONE_WEIGHT_ATTRIBUTE
                        FILE_NORMAL_ATTRIBUTE, index_checksum, position_checksum,
                        valid_triangles)
 from .rose.zmd import ZMD
+from .import_zms import add_zms_bone_groups
 
 
 class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
@@ -375,7 +376,8 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
 
         joint_names is the ZMD-ordered joint list (bones, then dummies) used
         to resolve global bone ids to vertex-group names. It must NOT be
-        derived from armature collection order (see above).
+        derived from armature collection order (see above). Without an
+        armature the skin goes to zms_bone_{i} groups, as in import_zms.
         """
         mesh = bpy.data.meshes.new(filename)
         
@@ -512,8 +514,13 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
         # Create object
         obj = bpy.data.objects.new(filename, mesh)
         
-        # Create vertex groups for bones BEFORE parenting
-        if len(zms.bones) > 0 and armature_obj:
+        # Create vertex groups for bones BEFORE parenting. Without a
+        # skeleton there are no joint names: use import_zms's zms_bone_{i}
+        # table-slot groups, which the exporter maps back through
+        # zms_bones, instead of dropping the skin.
+        if not armature_obj:
+            add_zms_bone_groups(obj, zms)
+        elif len(zms.bones) > 0:
             # Resolve global bone ids through the ZMD-ordered joint list.
             # Fall back to armature order only when no ZMD names were passed
             # (armature imported from elsewhere).

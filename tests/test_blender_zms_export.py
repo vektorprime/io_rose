@@ -11,6 +11,8 @@ Run with the Blender executable (requires bpy):
   including normals Blender cannot represent, non-tight bounding boxes,
   unsorted / unnormalized weights and zero-weight slots, and for a
   deterministic sample of client files the exporter can reproduce.
+  import_zms_zmd without a skeleton alongside makes the same zms_bone_{i}
+  groups and weights as import_zms instead of dropping the skin.
 - The recorded box and skin stash only apply while they still describe the
   mesh: a moved vertex, world transform or topology edit recomputes the
   box (in file units: v5/v6 * 100, like the positions), and edited vertex
@@ -108,6 +110,17 @@ def import_zms_zmd(path):
     reset_scene()
     bpy.ops.rose.import_zms_zmd(filepath=path, load_texture=False, import_all_zms=False)
     return next(o for o in bpy.data.objects if o.type == 'MESH')
+
+
+def has_zmd(path):
+    """True if import_zms_zmd finds a skeleton for this file."""
+    return bool(glob.glob(os.path.join(os.path.dirname(path), "*.ZMD")))
+
+
+def vertex_groups(obj):
+    """Group names in index order and each vertex's (group, weight) pairs."""
+    return ([g.name for g in obj.vertex_groups],
+            [sorted((g.group, g.weight) for g in v.groups) for v in obj.data.vertices])
 
 
 def export(obj, name, **kwargs):
@@ -293,6 +306,18 @@ def test_import_state():
                     f"{label}: file blend weights and bone slots stashed bit-for-bit")
     ok &= check(skin_stash(import_zms(NONUNIT_ZMS).data) is None, "static mesh: no skin stash")
 
+    # No skeleton alongside: import_zms_zmd keeps the skin in import_zms's
+    # zms_bone_{i} table-slot groups instead of dropping it
+    src = ZMS(MATERIALS_ZMS, report_func=lambda *a: None)
+    obj = import_zms_zmd(MATERIALS_ZMS)
+    ok &= check(src.bones_enabled() and not has_zmd(MATERIALS_ZMS) and obj.parent is None,
+                "fixture: skinned file without a skeleton alongside")
+    names, weights = groups = vertex_groups(obj)
+    ok &= check(names == [f"zms_bone_{i}" for i in range(len(src.bones))] and any(weights),
+                "import_zms_zmd without skeleton: one zms_bone_{i} group per bone table entry")
+    ok &= check(groups == vertex_groups(import_zms(MATERIALS_ZMS)),
+                "import_zms_zmd without skeleton: same groups and weights as import_zms")
+
     # Would crash Blender (EXCEPTION_ACCESS_VIOLATION) before the fix
     src = ZMS(DEGENERATE_ZMS, report_func=lambda *a: None)
     obj = import_zms(DEGENERATE_ZMS)
@@ -312,12 +337,18 @@ def test_unedited_round_trip():
                                   ("skinned import_zms_zmd", import_zms_zmd, SKINNED_ZMS),
                                   ("zero-weight slots", import_zms, ZERO_SLOT_ZMS),
                                   ("zero-weight slots import_zms_zmd", import_zms_zmd, ZERO_SLOT_ZMS),
-                                  ("material face counts", import_zms, MATERIALS_ZMS)):
+                                  ("material face counts", import_zms, MATERIALS_ZMS),
+                                  ("skinned import_zms_zmd without skeleton", import_zms_zmd,
+                                   MATERIALS_ZMS)):
         obj = importer(path)
-        if importer is import_zms_zmd:
+        if importer is import_zms_zmd and has_zmd(path):
             ok &= check(obj.parent is not None and obj.parent.type == 'ARMATURE' and
                         not any(g.name.startswith("zms_bone_") for g in obj.vertex_groups),
                         f"{label}: skeleton found, weights in joint-named groups")
+        elif importer is import_zms_zmd:
+            ok &= check(obj.parent is None and len(obj.vertex_groups) > 0 and
+                        all(g.name == f"zms_bone_{g.index}" for g in obj.vertex_groups),
+                        f"{label}: no skeleton, weights in zms_bone_{{i}} groups")
         out, zms, messages = export(obj, "roundtrip.zms")
         ok &= check(same_bytes(path, out),
                     f"unedited {label} round trip byte-identical ({os.path.basename(path)})")
@@ -325,7 +356,7 @@ def test_unedited_round_trip():
     src = ZMS(MATERIALS_ZMS, report_func=lambda *a: None)
     ok &= check(src.materials == [84, 104], "fixture has material face counts")
 
-    tested, failed, skinned, loose_box, with_zmd = 0, [], 0, 0, 0
+    tested, failed, skinned, loose_box, with_zmd, without_zmd = 0, [], 0, 0, 0, 0
     files = sorted(glob.glob(os.path.join(ROOT, "**", "*.ZMS"), recursive=True))
     for path in files[::SAMPLE_STEP]:
         try:
@@ -338,19 +369,24 @@ def test_unedited_round_trip():
         skinned += src.bones_enabled()
         loose_box += box(src) != tight_box(src)
         importers = [import_zms]
-        # import_zms_zmd makes no vertex groups without a skeleton alongside
-        if src.bones_enabled() and glob.glob(os.path.join(os.path.dirname(path), "*.ZMD")):
+        # Skinned files also through import_zms_zmd: joint-named groups with
+        # a skeleton alongside, zms_bone_{i} groups without one
+        if src.bones_enabled():
             importers.append(import_zms_zmd)
-            with_zmd += 1
+            if has_zmd(path):
+                with_zmd += 1
+            else:
+                without_zmd += 1
         for importer in importers:
             out, _, _ = export(importer(path), "sample.zms")
             if not same_bytes(path, out):
                 failed.append(f"{os.path.relpath(path, ROOT)} ({importer.__name__})")
     ok &= check(tested >= 150 and skinned >= 30 and loose_box >= 100 and with_zmd >= 15
-                and not failed,
+                and without_zmd >= 20 and not failed,
                 f"sampled client files round-trip byte-identically "
-                f"({tested - len(failed)}/{tested}; {skinned} skinned, {with_zmd} also "
-                f"through import_zms_zmd, {loose_box} non-tight boxes; failed: {failed[:5]})")
+                f"({tested - len(failed)}/{tested}; {skinned} skinned, also through "
+                f"import_zms_zmd: {with_zmd} with a skeleton, {without_zmd} without; "
+                f"{loose_box} non-tight boxes; failed: {failed[:5]})")
     return ok
 
 
@@ -479,10 +515,13 @@ def test_skin_weights():
 
     # Edited weights on some vertices: those export exactly as without the
     # stash, the untouched ones keep the file's slots and weight bits
-    src = ZMS(SKINNED_ZMS, report_func=lambda *a: None)
     edited = {0, 5, 9}
-    for label, importer in (("import_zms", import_zms), ("import_zms_zmd", import_zms_zmd)):
-        obj = importer(SKINNED_ZMS)
+    for label, importer, path in (("import_zms", import_zms, SKINNED_ZMS),
+                                  ("import_zms_zmd", import_zms_zmd, SKINNED_ZMS),
+                                  ("import_zms_zmd without skeleton", import_zms_zmd,
+                                   MATERIALS_ZMS)):
+        src = ZMS(path, report_func=lambda *a: None)
+        obj = importer(path)
         for vi in edited:
             g = obj.data.vertices[vi].groups[0]
             obj.vertex_groups[g.group].add([vi], 0.25 if g.weight != 0.25 else 0.5, 'REPLACE')
