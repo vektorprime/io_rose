@@ -320,12 +320,19 @@ class EnhanceWings(bpy.types.Operator):
 
             # Metadata stashes the exporter restores (version/bones/strips/
             # materials); without them re-export writes defaults/white.
+            # The original topology is recorded too: the densified mesh no
+            # longer matches it, so the exporter drops the stale strips and
+            # material face counts instead of writing them verbatim.
+            from .rose.zms import index_checksum
             obj["zms_version"] = z.version
             obj["zms_strips"] = str(list(z.strips))
             if z.bones:
                 obj["zms_bones"] = str([int(b) for b in z.bones])
             if z.materials:
                 obj["zms_materials"] = str([int(m) for m in z.materials])
+            obj["zms_import_vertex_count"] = len(z.vertices)
+            obj["zms_import_triangle_count"] = len(z.indices)
+            obj["zms_import_index_crc"] = index_checksum(z.indices)
 
             if z.bones and any(orig_weights):
                 from mathutils.kdtree import KDTree

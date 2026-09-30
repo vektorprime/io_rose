@@ -1,6 +1,45 @@
 import struct
+import zlib
 from enum import IntEnum
 from .utils import *
+
+# Mesh attribute (POINT, FLOAT_VECTOR) where the importers stash the file's
+# exact per-vertex normals. Blender stores custom normals quantized (int16),
+# so the exporter needs these to write an unedited import back bit-for-bit.
+FILE_NORMAL_ATTRIBUTE = "zms_normal"
+
+
+def index_checksum(indices):
+    """CRC32 (8 hex digits) of a triangle index list (Vector3 per face).
+
+    The importers record it as obj["zms_import_index_crc"]; the exporter
+    compares it with the triangle list it is about to write. Strips
+    (ibuf_strip) and material face counts (matid_numfaces) are only valid
+    for the exact triangle list and vertex numbering they were built from.
+    """
+    flat = []
+    for idx in indices:
+        flat.extend((int(idx.x), int(idx.y), int(idx.z)))
+    return f"{zlib.crc32(struct.pack(f'<{len(flat)}I', *flat)):08x}"
+
+
+def valid_triangles(indices):
+    """Triangles as (a, b, c) int tuples, skipping degenerate ones.
+
+    26 of the 2882 client meshes contain triangles that repeat a vertex,
+    e.g. (0, 1, 1) (strip joins: ITEM/BACK/BACK02.ZMS, several BODY/HAIR
+    parts). They have zero area, but mesh.from_pydata keeps them as invalid
+    faces without a valid edge per corner, and normals_split_custom_set
+    then reads garbage edge indices and can crash Blender
+    (EXCEPTION_ACCESS_VIOLATION in mesh_normals_corner_custom_set).
+    """
+    faces = []
+    for idx in indices:
+        face = (int(idx.x), int(idx.y), int(idx.z))
+        if face[0] != face[1] and face[1] != face[2] and face[0] != face[2]:
+            faces.append(face)
+    return faces
+
 
 class VertexFlags(IntEnum):
     POSITION = 2      # (1 << 1)

@@ -22,6 +22,7 @@ guard against regressions.
 | test_blender_materials.py | Blender headless | UV maps, per-pair materials, layer2 rotation, DDS alpha, Non-Color + Gamma |
 | test_eft_roundtrip.py | pure python | every EFT/PTL file saves back byte-identically; effective-path rules |
 | test_blender_eft.py | Blender headless | `.eft` import (slots, meshes, particle preview, TRAJ baking) + export round-trip |
+| test_blender_zms_export.py | Blender headless | ZMS export: stale strips/material counts dropped after topology edits (subdivide, delete, flip, mirror, older imports), unedited round trip byte-identical through both importers (incl. normals Blender cannot store) and on a client sample, exported normals = custom corner normals (UV-seam hard edge, split pieces, world transform), degenerate-triangle import crash |
 
 ## Test data
 
@@ -60,7 +61,13 @@ Blender headless tests (must run with the Blender executable so `bpy` exists):
 "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --factory-startup --python tests/test_blender_import.py
 "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --factory-startup --python tests/test_blender_materials.py
 "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --factory-startup --python tests/test_blender_eft.py
+"C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --factory-startup --python tests/test_blender_zms_export.py
 ```
+
+`test_blender_zms_export.py` loads the addon from its own checkout, so it
+also tests git worktrees whose directory is not named `io_rose`; the other
+Blender tests `import io_rose` from the parent directory, which in a
+worktree silently resolves to the installed `addons_core/io_rose`.
 
 All scripts exit with code 0 on success, 1 on failure.
 

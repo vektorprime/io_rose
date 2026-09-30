@@ -66,7 +66,7 @@ from mathutils import Quaternion, Vector
 
 from .rose.eft import Eft
 from .rose.ptl import Ptl
-from .rose.zms import ZMS
+from .rose.zms import ZMS, valid_triangles
 from .rose.zmo import ZMO
 
 
@@ -1468,13 +1468,16 @@ class ImportEFT(bpy.types.Operator, ImportHelper):
             return None
         mesh = bpy.data.meshes.new(zms_path.stem)
         verts = [(v.position.x, v.position.y, v.position.z) for v in zms.vertices]
-        faces = [(int(f.x), int(f.y), int(f.z)) for f in zms.indices]
+        # Degenerate triangles make Blender crash (see valid_triangles)
+        faces = valid_triangles(zms.indices)
         try:
             mesh.from_pydata(verts, [], faces)
         except Exception as e:
             self.report({"WARNING"}, f"Bad mesh data in {zms_path.name}: {e}")
             bpy.data.meshes.remove(mesh)
             return None
+        # Smooth before the custom normals (stored relative to shading)
+        mesh.shade_smooth()
         if zms.normals_enabled():
             try:
                 normals = [(v.normal.x, v.normal.y, v.normal.z) for v in zms.vertices]

@@ -75,7 +75,11 @@ economy, texture palette are out of scope for now).
      `File > Export > ROSE Object - Add Selected Mesh to Zone`
      (exports the mesh as `.ZMS`, appends a ZSC entry + optional
      texture `.DDS`, creates a placement empty at the origin; move the
-     empty where you want it).
+     empty where you want it). The mesh is exported in world space with
+     the `(x, -y, z)` mirror: custom normals follow the inverse transpose
+     of the object transform, and an imported ZMS loses its strips and
+     material face counts (the mirror swaps the winding, so they no longer
+     match - see blender-importer.md, "ZMS round trip").
 3. **Save** (`File > Export > ROSE Zone (.zon) - Save Edited Zone`).
    The report lists updated/added/deleted objects and rewritten
    terrain blocks. Reload the zone in the game to see changes.

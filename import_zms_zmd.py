@@ -17,7 +17,7 @@ import mathutils as bmath
 from bpy.props import StringProperty, BoolProperty
 from bpy_extras.io_utils import ImportHelper
 
-from .rose.zms import ZMS
+from .rose.zms import ZMS, FILE_NORMAL_ATTRIBUTE, index_checksum, valid_triangles
 from .rose.zmd import ZMD
 
 
@@ -390,14 +390,20 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
         else:
             normals = None
         
-        # Faces
-        faces = []
-        for i in zms.indices:
-            faces.append((int(i.x), int(i.y), int(i.z)))
-        
+        # Faces, minus zero-area degenerate triangles that make Blender
+        # crash (see valid_triangles)
+        faces = valid_triangles(zms.indices)
+        if len(faces) < len(zms.indices):
+            self.report({'INFO'}, f"{filename}: skipped "
+                                  f"{len(zms.indices) - len(faces)} degenerate triangles")
+
         # Create mesh
         mesh.from_pydata(verts, [], faces)
-        
+        # from_pydata creates flat faces; ZMS normals are per vertex. Smooth
+        # shading must be set BEFORE the custom normals: they are stored
+        # relative to the (shading dependent) corner normal spaces.
+        mesh.shade_smooth()
+
         # Set normals
         if normals is not None:
             loop_normals = []
@@ -405,6 +411,9 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
                 vi = loop.vertex_index
                 loop_normals.append(normals[vi])
             mesh.normals_split_custom_set(loop_normals)
+            # Exact file normals for a bit-exact re-export (see exporter)
+            attr = mesh.attributes.new(FILE_NORMAL_ATTRIBUTE, 'FLOAT_VECTOR', 'POINT')
+            attr.data.foreach_set("vector", [c for n in normals for c in n])
         
         # UV layers
         if zms.uv1_enabled():
@@ -541,7 +550,12 @@ class ImportZMSwithZMD(bpy.types.Operator, ImportHelper):
         obj["zms_strips"] = str(zms.strips)
         obj["zms_pool"] = zms.pool
         obj["zms_bones"] = str(zms.bones)
-        
+        # Imported topology: the exporter restores strips/materials only
+        # while the triangle list it writes still matches these
+        obj["zms_import_vertex_count"] = len(zms.vertices)
+        obj["zms_import_triangle_count"] = len(zms.indices)
+        obj["zms_import_index_crc"] = index_checksum(zms.indices)
+
         # Link to scene
         context.collection.objects.link(obj)
         

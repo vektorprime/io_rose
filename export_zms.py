@@ -1,6 +1,7 @@
 from pathlib import Path
 import struct
 import ast
+import math
 
 if "bpy" in locals():
     import importlib
@@ -8,8 +9,116 @@ else:
     from .rose.zms import *
 
 import bpy
+import mathutils
 from bpy.props import StringProperty, BoolProperty, EnumProperty
 from bpy_extras.io_utils import ExportHelper
+
+
+def _corner_normals(mesh, normal_matrix=None):
+    """Per-corner (x, y, z) normals of a mesh with custom normals, else None.
+
+    Custom normals are what the viewport shows; vertex.normal is recomputed
+    from the object's own faces, so pieces split from one mesh (head/body/
+    tail) would get different normals along their shared seam.
+    normal_matrix (3x3 inverse transpose) is applied for world-space
+    export: decoded custom normals do not survive non-uniform scale or
+    mirroring through bmesh.ops.transform, so they are read from the source
+    mesh and transformed here instead.
+    """
+    if not getattr(mesh, "has_custom_normals", False):
+        return None
+    corner_normals = getattr(mesh, "corner_normals", None)  # Blender 4.1+
+    if corner_normals is None or len(corner_normals) != len(mesh.loops):
+        return None
+    flat = [0.0] * (len(mesh.loops) * 3)
+    corner_normals.foreach_get("vector", flat)
+    normals = [tuple(flat[i:i + 3]) for i in range(0, len(flat), 3)]
+    if normal_matrix is not None:
+        normals = [tuple((normal_matrix @ mathutils.Vector(n)).normalized())
+                   for n in normals]
+    return normals
+
+
+def _is_identity(matrix, tolerance=1e-9):
+    return all(abs(matrix[i][j] - (1.0 if i == j else 0.0)) <= tolerance
+               for i in range(len(matrix)) for j in range(len(matrix)))
+
+
+def _file_normals(mesh):
+    """Exact per-vertex file normals stashed by the importers, or None."""
+    attr = mesh.attributes.get(FILE_NORMAL_ATTRIBUTE)
+    if attr is None or attr.domain != 'POINT' or attr.data_type != 'FLOAT_VECTOR':
+        return None
+    flat = [0.0] * (len(mesh.vertices) * 3)
+    attr.data.foreach_get("vector", flat)
+    return [tuple(flat[i:i + 3]) for i in range(0, len(flat), 3)]
+
+
+def _topology_change(obj, zms):
+    """Why zms no longer has the imported topology, or None if it does.
+
+    Strips (ibuf_strip) index the vertex buffer and material face counts
+    (matid_numfaces) partition the triangle list, so both are only valid
+    while the exported triangle list equals the imported one.
+    """
+    imported = (obj.get("zms_import_vertex_count"),
+                obj.get("zms_import_triangle_count"))
+    if None in imported:
+        return ("no imported vertex/triangle counts recorded "
+                "(imported by an older io_rose; re-import to keep them)")
+    exported = (len(zms.vertices), len(zms.indices))
+    if exported != (int(imported[0]), int(imported[1])):
+        return (f"mesh now has {exported[0]} verts / {exported[1]} tris, "
+                f"imported {imported[0]} / {imported[1]}")
+    crc = obj.get("zms_import_index_crc")
+    if crc is not None and crc != index_checksum(zms.indices):
+        return ("triangle list differs from the imported one (edited faces, "
+                "or winding swapped by the coordinate conversion)")
+    return None
+
+
+def _unchanged_file_normals(mesh, file_normals):
+    """Per mesh vertex: True while its custom normals are still exactly what
+    importing the stashed file normals produced.
+
+    Blender stores custom normals as int16 offsets inside each corner's
+    normal space, so they decode off by ~1e-4 rad, and ~2.6% of client
+    vertices cannot be represented at all (up to 90 deg off, or zero for a
+    normal perpendicular to its only face). No angle tolerance can tell
+    those from edits; re-applying the stash to a copy and comparing the
+    decoded corner normals can.
+    """
+    if len(file_normals) != len(mesh.vertices):
+        return None
+    loop_verts = [0] * len(mesh.loops)
+    mesh.loops.foreach_get("vertex_index", loop_verts)
+    probe = mesh.copy()
+    try:
+        probe.normals_split_custom_set([file_normals[vi] for vi in loop_verts])
+        expected = [0.0] * (len(loop_verts) * 3)
+        probe.corner_normals.foreach_get("vector", expected)
+    finally:
+        bpy.data.meshes.remove(probe)
+    current = [0.0] * (len(loop_verts) * 3)
+    mesh.corner_normals.foreach_get("vector", current)
+    unchanged = [True] * len(mesh.vertices)
+    for loop_idx, vi in enumerate(loop_verts):
+        i = loop_idx * 3
+        if (abs(current[i] - expected[i]) > 1e-6 or
+                abs(current[i + 1] - expected[i + 1]) > 1e-6 or
+                abs(current[i + 2] - expected[i + 2]) > 1e-6):
+            unchanged[vi] = False
+    return unchanged
+
+
+def _restore_file_normals(zms, source_vertices, file_normals, unchanged,
+                          convert_coordinates):
+    """Write the exact stashed file normal for every exported vertex whose
+    source vertex still has its imported normals (bit-exact round trip)."""
+    for v, vert_idx in zip(zms.vertices, source_vertices):
+        if unchanged[vert_idx]:
+            fx, fy, fz = file_normals[vert_idx]
+            v.normal = Vector3(fx, -fy if convert_coordinates else fy, fz)
 
 
 def _mesh_has_colors(mesh):
@@ -118,6 +227,13 @@ def export_zms_mesh_object(obj, filepath, version=8, export_normals=True,
     if len(mesh.loop_triangles) > count_limit:
         return f"Mesh has {len(mesh.loop_triangles)} triangles (max {count_limit} for v{version})."
 
+    # Custom normals come from the source mesh (see _corner_normals); the
+    # bmesh round trip below keeps loop order, so indices still line up.
+    normal_matrix = None
+    if apply_world_transform:
+        normal_matrix = obj.matrix_world.to_3x3().inverted_safe().transposed()
+    corner_normals = _corner_normals(mesh, normal_matrix) if export_normals else None
+
     # Apply all transformations before export (only for world-space meshes;
     # imported ROSE meshes are kept in local space for a faithful round trip)
     import bmesh
@@ -165,12 +281,15 @@ def export_zms_mesh_object(obj, filepath, version=8, export_normals=True,
     # Create ZMS from mesh. The operator class cannot be instantiated
     # (bpy_struct), so the methods are called with None as self - they only
     # use getattr-based defaults and the explicit parameters.
+    source_vertices = []
     zms = ExportZMS.zms_from_mesh_data(None, temp_mesh, obj, orig_bones, version,
                                        export_normals=export_normals,
                                        export_colors=export_colors,
                                        export_uv=export_uv,
                                        convert_coordinates=convert_coordinates,
-                                       report=report)
+                                       report=report,
+                                       corner_normals=corner_normals,
+                                       source_vertices=source_vertices)
 
     # Clean up temp mesh
     bpy.data.meshes.remove(temp_mesh)
@@ -178,11 +297,29 @@ def export_zms_mesh_object(obj, filepath, version=8, export_normals=True,
     if zms is None:
         return "ZMS creation failed"
 
-    # Apply restored metadata
-    if orig_materials is not None:
-        zms.materials = orig_materials
-    if orig_strips is not None:
-        zms.strips = orig_strips
+    # Apply restored metadata. Strips, material face counts and the exact
+    # file normals belong to the imported triangle list: after a topology
+    # edit (decimate, subdivide, re-mesh) they would describe the old layout.
+    topology_change = _topology_change(obj, zms)
+    if topology_change is None:
+        if orig_materials is not None:
+            zms.materials = orig_materials
+        if orig_strips is not None:
+            zms.strips = orig_strips
+        # Exact file normals only where the object adds no rotation/shear
+        # (world export of a moved or uniformly scaled object is fine)
+        file_normals = None
+        if zms.normals_enabled() and (normal_matrix is None or
+                                      _is_identity(normal_matrix.normalized())):
+            file_normals = _file_normals(mesh)
+        unchanged = (_unchanged_file_normals(mesh, file_normals)
+                     if file_normals is not None else None)
+        if unchanged is not None:
+            _restore_file_normals(zms, source_vertices, file_normals,
+                                  unchanged, convert_coordinates)
+    elif orig_materials or orig_strips:
+        report('INFO', f"{obj.name}: {topology_change}; writing empty "
+                       f"triangle strips and material face counts")
     if orig_pool is not None:
         zms.pool = orig_pool
     if orig_bones is not None:
@@ -267,8 +404,17 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
     
     def zms_from_mesh_data(self, mesh, obj=None, orig_bones=None, version=8,
                            export_normals=None, export_colors=None, export_uv=None,
-                           convert_coordinates=False, report=None):
-        """Extract ZMS data from mesh data"""
+                           convert_coordinates=False, report=None,
+                           corner_normals=None, source_vertices=None):
+        """Extract ZMS data from mesh data.
+
+        corner_normals: optional per-loop normals (see _corner_normals);
+            derived from `mesh` when omitted. When present, each exported
+            vertex gets the average over the loops that share its
+            (vertex, uv, color) key; otherwise vertex.normal is used.
+        source_vertices: optional list, filled with the mesh vertex index of
+            every exported vertex.
+        """
         # Create a report function wrapper
         if report is None:
             report = lambda level, message: (self.report({level}, message)
@@ -330,8 +476,16 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
             zms.flags |= VertexFlags.BONE_WEIGHT
             zms.flags |= VertexFlags.BONE_INDEX
 
+        if zms.normals_enabled() and (corner_normals is None or
+                                      len(corner_normals) != len(mesh.loops)):
+            corner_normals = _corner_normals(mesh)
+
         # Split vertices by unique UV coordinates
         vertex_map = {}
+        if source_vertices is None:
+            source_vertices = []
+        # Exported vertex of every loop, for the per-key normal average
+        loop_vertex = [-1] * len(mesh.loops)
 
         # Process each triangle
         for tri in mesh.loop_triangles:
@@ -362,7 +516,7 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
                 # uint16 cap applies only below v9 (the caller already gates
                 # the pre-split mesh size via count_limit).
                 if version < 9 and len(zms.vertices) >= 65535:
-                    report({'ERROR'}, f"Vertex count would exceed 65,535 after UV splitting. Current: {len(zms.vertices)}. Reduce subdivision or use fewer UV seams.")
+                    report('ERROR', f"Vertex count would exceed 65,535 after UV splitting. Current: {len(zms.vertices)}. Reduce subdivision or use fewer UV seams.")
                     return None
                 
                 if key not in vertex_map:
@@ -381,14 +535,8 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
                         v.position.y *= 100.0
                         v.position.z *= 100.0
                     
-                    if zms.normals_enabled():
-                        if convert_coordinates:
-                            # vec3 normal - apply Blender → Rose coordinate transform
-                            # Both use Z-up, inverse of import transform (x, -y, z) -> (x, -y, z)
-                            v.normal = Vector3(vert.normal.x, -vert.normal.y, vert.normal.z)
-                        else:
-                            v.normal = Vector3(vert.normal.x, vert.normal.y, vert.normal.z)
-                    
+                    # vec3 normal: set after all triangles (per-key average)
+
                     # zz_color (4x float)
                     if zms.colors_enabled():
                         loop_c = _loop_color(mesh, loop_idx, vert_idx)
@@ -442,9 +590,11 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
 
                     new_idx = len(zms.vertices)
                     zms.vertices.append(v)
+                    source_vertices.append(vert_idx)
                     vertex_map[key] = new_idx
-                
+
                 tri_indices.append(vertex_map[key])
+                loop_vertex[loop_idx] = vertex_map[key]
 
             # usvec3 - 3x uint16 indices per face.
             # The (x, -y, z) coordinate mirror has determinant -1, so when
@@ -455,7 +605,39 @@ class ExportZMS(bpy.types.Operator, ExportHelper):
                     zms.indices.append(Vector3(tri_indices[0], tri_indices[2], tri_indices[1]))
                 else:
                     zms.indices.append(Vector3(tri_indices[0], tri_indices[1], tri_indices[2]))
-        
+
+        # vec3 normals. Custom (corner) normals win over vertex.normal: they
+        # are what the viewport shows, and they stay identical across pieces
+        # split from one mesh. Loops sharing an exported key are averaged
+        # (each loop once, even when an n-gon's triangulation reuses it).
+        if zms.normals_enabled():
+            sums = None
+            if corner_normals is not None:
+                sums = [[0.0, 0.0, 0.0] for _ in zms.vertices]
+                for loop_idx, new_idx in enumerate(loop_vertex):
+                    if new_idx < 0:
+                        continue
+                    n = corner_normals[loop_idx]
+                    s = sums[new_idx]
+                    s[0] += n[0]
+                    s[1] += n[1]
+                    s[2] += n[2]
+            for new_idx, v in enumerate(zms.vertices):
+                n = None
+                if sums is not None:
+                    s = sums[new_idx]
+                    length = math.sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2])
+                    if length > 1e-12:
+                        n = (s[0] / length, s[1] / length, s[2] / length)
+                if n is None:
+                    n = mesh.vertices[source_vertices[new_idx]].normal
+                if convert_coordinates:
+                    # Blender → Rose coordinate transform, inverse of the
+                    # import (x, -y, z) mirror (both Z-up)
+                    v.normal = Vector3(n[0], -n[1], n[2])
+                else:
+                    v.normal = Vector3(n[0], n[1], n[2])
+
         # Calculate bounding box (vec3 pmin, pmax)
         if len(zms.vertices) > 0:
             # Get positions (accounting for scaling)

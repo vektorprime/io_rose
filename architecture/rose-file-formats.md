@@ -157,6 +157,13 @@ XYZW (x first).
   BONE_WEIGHT=16, BONE_INDEX=32, TANGENT=64, UV1..UV4 = 128..1024
   (`rose/zms.py:5-15`, FIXED ORDER). v5/6: u32 counts, per-vertex u32 ID,
   positions scaled by 100.0 (must divide). v7/8: u16 counts, no vertex IDs.
+  After the triangles: `matid_numfaces` (u16 list, per-subset face counts
+  summing to the triangle count), `ibuf_strip` (u16 strip index buffer into
+  the vertex array) and, v8+, a u16 pool. Client data (2882 files): 1143
+  have strips, 364 material counts, none both; 351 store non-unit normals
+  and 26 contain degenerate triangles (strip joins such as `(0, 1, 1)`).
+  Both lists are only valid for the exact triangle list they came with -
+  see blender-importer.md, "ZMS round trip".
 - **EFT/PTL** (effects/particles): parsers `rose/eft.py`, `rose/ptl.py`;
   operators `import_eft.py` / `export_eft.py` (slots, meshes, particle
   preview, TRAJ baking). Byte-exact round-trip covered by

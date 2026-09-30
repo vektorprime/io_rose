@@ -192,3 +192,100 @@ Debug recipe (file->game axis map without launching the game): load
 MALE.ZMD, compute the global bind pose of dummy `p_03` using the client's
 own conversions (`pos (x, z, -y)/100`, `Quat::from_xyzw(x, z, -y, w)`,
 hierarchy multiply), then compose with the loader swap above.
+
+## ZMS round trip: strips, material counts, normals (2026-09-30)
+
+Found during a mesh-replacement task: re-exporting an imported ZMS after a
+topology edit wrote the imported strips verbatim, and normals were not the
+file's. Guarded by `tests/test_blender_zms_export.py`.
+
+### What the importers store
+
+`import_zms.py`, `import_zms_zmd.py` (`_create_mesh`):
+
+- Object props (restored by `export_zms_mesh_object`): `zms_version`,
+  `zms_identifier`, `zms_bones`, `zms_pool`, `zms_strips` (ibuf_strip),
+  `zms_materials` (matid_numfaces), plus the imported topology
+  `zms_import_vertex_count`, `zms_import_triangle_count` and
+  `zms_import_index_crc` (`rose/zms.py` `index_checksum`, CRC32 of the
+  triangle index list).
+- Mesh attribute `zms_normal` (POINT, FLOAT_VECTOR): the exact file
+  normals, including non-unit ones (351 client files).
+- Faces are smooth shaded **before** `normals_split_custom_set` (custom
+  normals are stored relative to the shading-dependent corner spaces, so
+  changing shading afterwards changes them). `import_eft.py` does the same.
+- Degenerate triangles (a repeated vertex, e.g. `(0, 1, 1)` strip joins;
+  26 client files, e.g. `ITEM/BACK/BACK02.ZMS`) are skipped
+  (`rose/zms.py` `valid_triangles`). `from_pydata` keeps them as invalid
+  faces with no valid edge per corner, and `normals_split_custom_set` then
+  read garbage edge indices: EXCEPTION_ACCESS_VIOLATION in
+  `mesh_normals_corner_custom_set`, depending on memory layout (it also
+  crashed the pre-fix, flat-shaded importer). They have zero area, so
+  nothing visible is lost, but those files no longer round-trip exactly.
+
+### Strips and material face counts are topology-bound
+
+`ibuf_strip` indexes the vertex buffer and `matid_numfaces` partitions the
+triangle list (per-subset face counts; they sum to the triangle count in
+all 364 client files that have them). The exporter restores both only
+while the triangle list it writes has the imported vertex/triangle counts
+and index CRC (`export_zms.py` `_topology_change`). Otherwise - decimate,
+subdivide, re-mesh, deleted or flipped faces, the winding swap of
+`convert_coordinates=True`, or an object imported before these props
+existed - it writes empty lists and reports INFO with the reason. Bones and
+pool are not topology-bound and are always restored. Counts alone are not
+enough: a flipped face keeps both counts, and in 10 client files the
+exporter's first-use vertex numbering differs from the file's, so the
+verbatim strips pointed at the wrong vertices.
+
+Callers: `export_zone.py` (`AddZoneObject`, mirrored export) therefore
+never ships strips for an imported mesh; `enhance_wings.py` records the
+original file's topology on its densified mesh so the stale strips/material
+counts are dropped (8 verts / 11 strip indices -> 1568 verts, strips empty).
+
+### Normals
+
+Blender 4.5 facts (measured, not assumed):
+
+- `MeshVertex.normal` is the normalized **mean of the vertex's corner
+  normals** when the mesh has custom normals; only without custom normals
+  is it the face-derived normal. `corner_normals` (4.1+) is what the
+  viewport shows.
+- Custom normals are stored as `custom_normal` (CORNER, INT16_2D) offsets
+  inside each corner's normal space: they decode ~1e-4 rad off, and about
+  2.6% of client vertices cannot be represented at all (up to 90 deg off,
+  or `(0, 0, 0)` for a normal perpendicular to its only face). Flat faces
+  still show custom normals; smooth faces lose slightly fewer (2.61% vs
+  2.81%).
+- `bmesh.ops.transform` moves the encoded normals with the geometry, which
+  is only right for rotation: non-uniform scale or mirroring corrupts them.
+- Separate (P) keeps the decoded custom normals of both pieces.
+
+Export (`zms_from_mesh_data`): with custom normals, each exported vertex
+(one per (vertex, uv, color) key) gets the normalized mean of the corner
+normals of the loops sharing that key, so a hard edge along a UV seam
+survives (the per-vertex mean blurred it). World-space export reads them
+from the source mesh and applies the inverse transpose of `matrix_world`.
+Without custom normals `vertex.normal` is used as before. When the topology
+is unchanged, every vertex whose corner normals still decode to exactly
+what re-applying `zms_normal` to a copy of the mesh produces gets the exact
+stashed file normal (`_unchanged_file_normals`); an angle tolerance cannot
+tell Blender's 90 deg losses from edits, the re-encode comparison can.
+
+Pieces split from one skinned mesh (head/body/tail) only share seam normals
+if the pieces carry the same custom normals along the seam (Separate keeps
+them, or Data Transfer from the whole mesh). A piece without custom normals
+exports its own face-derived normals, which differ per piece at the seam
+(22.6 deg on the test sheet); the exporter cannot recover those.
+
+### Byte-exact round trip
+
+An unedited import (either importer) re-exports byte-identically when the
+file fits the exporter's own model: 807 of 2882 client files. The rest
+differ for pre-existing reasons outside this fix: the bounding box is
+recomputed from the vertices (1979 files store a non-tight box), bone
+weights are renormalized/sorted (677 of 699 skinned files), normals are
+always written (30 files have none), vertices are renumbered in first-use
+order (10 files), v5/v6 positions go through `* 100` (float rounding), and
+degenerate triangles are skipped (26 files). No file differs in normals,
+strips, material counts or indices.
