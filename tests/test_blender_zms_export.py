@@ -34,8 +34,10 @@ import importlib.util
 import math
 import mathutils
 import os
+import shutil
 import struct
 import sys
+import tempfile
 import traceback
 
 ADDON_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -81,7 +83,10 @@ ZERO_SLOT_ZMS = os.path.join(ROOT, "NPC", "ANIMAL", "STAGBEETLE", "HEAD01_010.ZM
 V6_ZMS = os.path.join(ROOT, "AVATAR", "CAP", "CAP_02600.ZMS")
 BOX_PROPS = ("zms_import_bbox_min", "zms_import_bbox_max", "zms_import_position_crc")
 SAMPLE_STEP = 15
-TMP_DIR = os.path.join(os.environ.get("TEMP", "/tmp"), "io_rose_zms_export_test")
+# Private to this process: runs from other worktrees (and scripts importing
+# this module) write the same file names. main() removes it after a clean
+# run and keeps it for inspection when a check fails.
+TMP_DIR = tempfile.mkdtemp(prefix="io_rose_zms_export_")
 
 
 def check(condition, message):
@@ -730,12 +735,23 @@ def test_normals():
 
 
 def main():
+    ok = False
+    try:
+        ok = run_tests()
+    finally:
+        if ok or not os.listdir(TMP_DIR):
+            shutil.rmtree(TMP_DIR, ignore_errors=True)
+        else:
+            print(f"exported files kept in {TMP_DIR}")
+    return 0 if ok else 1
+
+
+def run_tests():
     for path in (STRIPS_ZMS, NONUNIT_ZMS, MATERIALS_ZMS, DEGENERATE_ZMS, DEGENERATE_MATERIALS_ZMS,
                  SKINNED_ZMS, ZERO_SLOT_ZMS, V6_ZMS):
         if not os.path.isfile(path):
             print(f"test file not found: {path}")
-            return 1
-    os.makedirs(TMP_DIR, exist_ok=True)
+            return False
     ok = True
     for test in (test_import_state, test_unedited_round_trip, test_edited_topology,
                  test_bounding_box, test_skin_weights, test_duplicate_bone_table,
@@ -747,7 +763,7 @@ def main():
             traceback.print_exc()
             ok = check(False, f"{test.__name__} raised")
     print("BLENDER ZMS EXPORT TEST " + ("OK" if ok else "FAILED"))
-    return 0 if ok else 1
+    return ok
 
 
 if __name__ == "__main__":

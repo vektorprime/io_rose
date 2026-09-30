@@ -16,7 +16,10 @@ import bpy
 import math
 import mathutils
 import os
+import shutil
 import sys
+import tempfile
+import traceback
 
 ADDON_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(ADDON_ROOT))
@@ -37,7 +40,10 @@ ANIM_EFT = os.path.join(EFFECT_DIR, "FLAT_POINT_01.EFT")
 GRAV_EFT = os.path.join(EFFECT_DIR, "_HIT_HAWK_01.EFT")
 # Radial debris spray (velocity spread wider than aim, ~0.73 m/s).
 JET_EFT = os.path.join(EFFECT_DIR, "BANDY_BOW_01.EFT")
-TMP_DIR = os.path.join(os.environ.get("TEMP", "/tmp"), "io_rose_eft_test")
+# Private to this process: runs from other worktrees write the same file
+# names. main() removes it after a clean run and keeps it for inspection
+# when a check fails.
+TMP_DIR = tempfile.mkdtemp(prefix="io_rose_eft_")
 
 
 def check(condition, message):
@@ -60,11 +66,26 @@ def live_particles(obj):
 
 
 def main():
+    code = 1
+    try:
+        code = run_tests()
+    except Exception:
+        # Blender's --python exits 0 on an uncaught exception
+        traceback.print_exc()
+        print("BLENDER EFT TEST FAILED")
+    finally:
+        if code == 0 or not os.listdir(TMP_DIR):
+            shutil.rmtree(TMP_DIR, ignore_errors=True)
+        else:
+            print(f"output files kept in {TMP_DIR}")
+    return code
+
+
+def run_tests():
     ok = True
     if not os.path.isfile(SRC_EFT):
         print(f"effect file not found: {SRC_EFT}")
         return 1
-    os.makedirs(TMP_DIR, exist_ok=True)
 
     res = bpy.ops.rose.import_eft(
         filepath=SRC_EFT,

@@ -69,6 +69,12 @@ also tests git worktrees whose directory is not named `io_rose`; the other
 Blender tests `import io_rose` from the parent directory, which in a
 worktree silently resolves to the installed `addons_core/io_rose`.
 
+`test_blender_eft.py` and `test_blender_zms_export.py` write their output
+into a directory private to the run (`%TEMP%\io_rose_eft_*`,
+`%TEMP%\io_rose_zms_export_*`), so concurrent runs from several worktrees
+cannot overwrite each other's files. It is removed after a clean run and
+kept, with its path printed, when a check fails.
+
 All scripts exit with code 0 on success, 1 on failure.
 
 ## Known data values (JDT01, update if the map data changes; only asserted values are enforced)
